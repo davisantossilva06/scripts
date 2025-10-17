@@ -1,0 +1,22 @@
+#-------------------------------------------------------------------------------------------------------------
+$script:sp = "$env:davi.lucas\Desktop\DHCP_EMPIRE.ps1"                                                        
+# O $script:sp cria uma variavel no scopo de script (visivel em todas as funçoes, assim facilitando o codigo) 
+# Ja o $enc=davi.lucas ele acessa a variavel de ambiente com o nome de usuario
+# E o \Desktop\DHCP_EMPIRE.ps1 obviamente é o caminho do arquivo 
+
+# $variavel = só essa função vê
+# $script:variavel = todo o script vê
+# O "$" = indica que é uma variavel
+# O "script:" é o SCOPE, ou seja o escopo do script inteiro
+# O "sp" nome da variavel é na verdade uma abreviação de ("script path")
+# O "=" é um operador de atribuição (ele vai guardar certo valor na variavel) Logo logo tem um exemplo melhor
+# O "$env:davi.lucas" é uma variavel de ambiente com nome do usuario, ou seja, ela é uma variavel pre-definida no sistema operacional que armazena informações sobre o ambiente de execução, como caminhos  de diretorios, configurações de usuario  ou nome do sistema.
+# o "\Desktop\" obiviamente o caminho pro desktop 
+# O "DHCP_EMPIRE.ps1" é o nome do arquivo script
+#------------------------------------------------------------------------------------------------------------
+
+#----------------
+$sp = $script:sp
+
+
+
