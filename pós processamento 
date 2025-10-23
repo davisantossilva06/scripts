@@ -1,0 +1,41 @@
+<#
+.SYNOPSIS
+    Analisador dos dados coletados
+#>
+
+function Analyze-CollectedData {
+    param([string]$AuditPath)
+    
+    Write-Host "=== ANALISANDO DADOS COLETADOS ===" -ForegroundColor Cyan
+    
+    $credsFile = Get-ChildItem "$AuditPath\all_credentials.txt" -ErrorAction SilentlyContinue
+    if ($credsFile) {
+        $content = Get-Content $credsFile.FullName -Raw
+        
+        # Procurar padrões de senhas
+        $passwordPatterns = @(
+            "SENHA ENCONTRADA:",
+            "Password:",
+            "pwd=",
+            "senha=",
+            "connectionString",
+            "token="
+        )
+        
+        foreach ($pattern in $passwordPatterns) {
+            $matches = [regex]::Matches($content, "$pattern.*?`n")
+            if ($matches.Count -gt 0) {
+                Write-Host "`n=== $pattern ===" -ForegroundColor Red
+                foreach ($match in $matches) {
+                    Write-Host $match.Value -ForegroundColor Yellow
+                }
+            }
+        }
+    }
+}
+
+# Executar análise se diretório existir
+$latestAudit = Get-ChildItem "C:\Temp" -Directory -Filter "FullAudit_*" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($latestAudit) {
+    Analyze-CollectedData -AuditPath $latestAudit.FullName
+}
