@@ -1,0 +1,46 @@
+<#
+.SYNOPSIS
+    Instalador de dependências para descriptografia SAM
+#>
+
+function Install-SAMTools {
+    Write-Host "INSTALANDO FERRAMENTAS PARA DESCRIPTOGRAFIA SAM" -ForegroundColor Magenta
+    
+    # Verificar e instalar Python
+    if (-not (Get-Command "python" -ErrorAction SilentlyContinue) -and 
+        -not (Get-Command "python3" -ErrorAction SilentlyContinue)) {
+        Write-Host "Python nao encontrado. Instalando..." -ForegroundColor Yellow
+        winget install Python.Python.3.11 -y
+    }
+    
+    # Instalar Impacket para secretsdump.py
+    Write-Host "Instalando Impacket..." -ForegroundColor Cyan
+    pip install impacket
+    
+    # Verificar se o secretsdump.py foi instalado
+    if (Get-Command "secretsdump.py" -ErrorAction SilentlyContinue) {
+        Write-Host "Impacket instalado com sucesso!" -ForegroundColor Green
+    } else {
+        Write-Host "Procurando secretsdump.py..." -ForegroundColor Yellow
+        $secretsdumpPath = Get-ChildItem -Path "$env:LOCALAPPDATA\Programs\Python" -Recurse -Name "secretsdump.py" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($secretsdumpPath) {
+            Write-Host "secretsdump.py encontrado em: $secretsdumpPath" -ForegroundColor Green
+        }
+    }
+    
+    # Tentar instalar pwdump
+    Write-Host "Procurando pwdump..." -ForegroundColor Cyan
+    # pwdump geralmente precisa ser baixado manualmente
+    
+    Write-Host "Instalacao concluida!" -ForegroundColor Green
+}
+
+# Executar instalador se solicitado
+$install = Read-Host "Deseja instalar as dependencias? (s/n)"
+if ($install -eq "s") {
+    Install-SAMTools
+}
+powershell -ExecutionPolicy Bypass -File "Descriptografador_SAM.ps1"
+
+# Instalar Python e Impacket
+pip install impacket
