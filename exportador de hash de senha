@@ -1,0 +1,34 @@
+<#
+.SYNOPSIS
+    Exporta hashes de senhas para análise de força
+#>
+
+function Export-PasswordHashes {
+    Write-Host "`n[+] Exportando hashes de senhas..." -ForegroundColor Cyan
+    
+    try {
+        # Método para obter hashes LM/NT (requer privilégios elevados)
+        if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            
+            # Usar ferramenta externa ou método do SAM
+            Write-Host "Administrador: Hashes podem ser extraídos com ferramentas especializadas" -ForegroundColor Yellow
+            
+            # Listar usuários e status
+            $users = Get-LocalUser | Select-Object Name, Enabled, PasswordRequired, PasswordChangeableDate
+            Write-Host "`nUsuarios locais:" -ForegroundColor Cyan
+            $users | Format-Table -AutoSize
+            
+        } else {
+            Write-Host "Execute como Administrador para extrair hashes de senhas" -ForegroundColor Red
+        }
+    }
+    catch {
+        Write-Host "Erro ao exportar hashes: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+# Executar exportação de hashes (se autorizado)
+$exportHashes = Read-Host "`nExportar hashes de senhas? (sim/nao)"
+if ($exportHashes -eq "sim") {
+    Export-PasswordHashes
+}
