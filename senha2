@@ -335,3 +335,6 @@ finally {
 }
 
 Write-Host "`nAuditoria finalizada as $(Get-Date)" -ForegroundColor Green
+
+
+Start-Process PowerShell -Verb RunAs -ArgumentList "-File C:\Caminho\CredentialAudit.ps1"
