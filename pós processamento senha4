@@ -1,0 +1,19 @@
+# Executar após o script principal para análise imediata
+Write-Log "Iniciando análise pós-coleta..." "Cyan"
+
+# Analisar resultados imediatamente
+if (Test-Path $credsFile) {
+    $content = Get-Content $credsFile -Raw
+    
+    Write-Log "`n=== SENHAS WI-FI ENCONTRADAS ===" "Red"
+    $wifiMatches = [regex]::Matches($content, "WI-FI:.*?SENHA:.*?(?=`n|$)")
+    foreach ($match in $wifiMatches) {
+        Write-Log $match.Value "Red"
+    }
+    
+    Write-Log "`n=== CREDENCIAIS DO REGISTRO ===" "Yellow"
+    $regMatches = [regex]::Matches($content, "REGISTRY:.*?(?=`n|$)")
+    foreach ($match in $regMatches) {
+        Write-Log $match.Value "Yellow"
+    }
+}
