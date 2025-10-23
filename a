@@ -594,3 +594,12 @@ try {
 Write-RealTime "Coleta finalizada em: $(Get-Date)" "Green" "END"
 
 
+
+
+# Método 1 - PowerShell normal
+powershell -ExecutionPolicy Bypass -WindowStyle Normal -File "ColetorUltimate.ps1"
+
+# Método 2 - Como Administrador (recomendado)
+Start-Process PowerShell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Caminho\ColetorUltimate.ps1`""
+
+
