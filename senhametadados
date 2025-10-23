@@ -1,0 +1,187 @@
+<#
+.SYNOPSIS
+    Script de Análise de Segurança - Para Ambientes Controlados
+.DESCRIPTION
+    Coleta informações de segurança para análise da equipe de segurança
+    USO APENAS EM AMBIENTES AUTORIZADOS
+.AUTHOR
+    Equipe de Segurança
+.NOTES
+    Requer consentimento por escrito e ambiente controlado
+#>
+
+# Verificação de Consentimento
+Write-Host "=== ANALISADOR DE SEGURANCA - AMBIENTE CONTROLADO ===" -ForegroundColor Red
+Write-Host "ESTE SCRIPT DEVE SER USADO APENAS COM AUTORIZACAO" -ForegroundColor Yellow
+Write-Host "EM TESTES DE SEGURANCA AUTORIZADOS" -ForegroundColor Yellow
+
+$confirm = Read-Host "Voce tem autorizacao para executar este script? (sim/nao)"
+if ($confirm -ne "sim") {
+    Write-Host "Execucao cancelada." -ForegroundColor Red
+    exit
+}
+
+# Registro de Auditoria
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$logFile = "C:\Temp\SecurityAudit_$timestamp.log"
+$outputFile = "C:\Temp\SecurityFindings_$timestamp.txt"
+
+# Criar diretório de saída se não existir
+if (!(Test-Path "C:\Temp")) {
+    New-Item -ItemType Directory -Path "C:\Temp" -Force
+}
+
+Start-Transcript -Path $logFile
+
+Write-Host "Iniciando analise de seguranca..." -ForegroundColor Green
+
+function Get-SecurityInfo {
+    param([string]$OutputPath)
+    
+    $results = @()
+    
+    # 1. INFORMAÇÕES DO SISTEMA
+    Write-Host "Coletando informacoes do sistema..." -ForegroundColor Cyan
+    $systemInfo = @{
+        Computername = $env:COMPUTERNAME
+        Username = $env:USERNAME
+        Domain = $env:USERDOMAIN
+        OSVersion = (Get-WmiObject Win32_OperatingSystem).Caption
+        LastBoot = (Get-WmiObject Win32_OperatingSystem).LastBootUpTime
+    }
+    $results += "=== INFORMACOES DO SISTEMA ==="
+    $results += ($systemInfo | Format-Table -AutoSize | Out-String)
+    
+    # 2. USUÁRIOS LOCAIS
+    Write-Host "Analisando usuarios locais..." -ForegroundColor Cyan
+    try {
+        $localUsers = Get-LocalUser | Select-Object Name, Enabled, LastLogon, Description
+        $results += "=== USUARIOS LOCAIS ==="
+        $results += ($localUsers | Format-Table -AutoSize | Out-String)
+    } catch {
+        $results += "Erro ao acessar usuarios locais: $($_.Exception.Message)"
+    }
+    
+    # 3. GRUPOS ADMINISTRATIVOS
+    Write-Host "Verificando grupos administrativos..." -ForegroundColor Cyan
+    try {
+        $adminGroup = Get-LocalGroupMember -Group "Administrators" | Select-Object Name, ObjectClass
+        $results += "=== MEMBROS DO GRUPO ADMINISTRADORES ==="
+        $results += ($adminGroup | Format-Table -AutoSize | Out-String)
+    } catch {
+        $results += "Erro ao acessar grupo Administradores: $($_.Exception.Message)"
+    }
+    
+    # 4. CREDENCIAIS ARMAZENADAS (APENAS METADADOS)
+    Write-Host "Verificando credenciais armazenadas..." -ForegroundColor Cyan
+    try {
+        # Lista credenciais do Windows Credential Manager (apenas nomes)
+        $credentialList = cmdkey /list 2>$null
+        $results += "=== CREDENCIAIS ARMAZENADAS (METADADOS) ==="
+        $results += $credentialList
+    } catch {
+        $results += "Erro ao acessar credenciais: $($_.Exception.Message)"
+    }
+    
+    # 5. POLÍTICAS DE SENHA
+    Write-Host "Verificando politicas de senha..." -ForegroundColor Cyan
+    try {
+        $passwordPolicy = net accounts
+        $results += "=== POLITICAS DE SENHA ==="
+        $results += $passwordPolicy
+    } catch {
+        $results += "Erro ao acessar politicas de senha: $($_.Exception.Message)"
+    }
+    
+    # 6. SERVIÇOS EM EXECUÇÃO
+    Write-Host "Analisando servicos..." -ForegroundColor Cyan
+    try {
+        $services = Get-Service | Where-Object {$_.Status -eq "Running"} | Select-Object Name, DisplayName, Status
+        $results += "=== SERVICOS EM EXECUCAO ==="
+        $results += ($services | Format-Table -AutoSize | Out-String)
+    } catch {
+        $results += "Erro ao acessar servicos: $($_.Exception.Message)"
+    }
+    
+    # 7. PORTAS ABERTAS
+    Write-Host "Verificando portas abertas..." -ForegroundColor Cyan
+    try {
+        $networkConnections = Get-NetTCPConnection | Where-Object {$_.State -eq "Listen"} | 
+                            Select-Object LocalAddress, LocalPort, State, OwningProcess
+        $results += "=== CONEXOES DE REDE ATIVAS ==="
+        $results += ($networkConnections | Format-Table -AutoSize | Out-String)
+    } catch {
+        $results += "Erro ao acessar conexoes de rede: $($_.Exception.Message)"
+    }
+    
+    # 8. APLICATIVOS INSTALADOS
+    Write-Host "Listando aplicativos instalados..." -ForegroundColor Cyan
+    try {
+        $applications = Get-WmiObject -Class Win32_Product | Select-Object Name, Version, Vendor
+        $results += "=== APLICATIVOS INSTALADOS ==="
+        $results += ($applications | Format-Table -AutoSize | Out-String)
+    } catch {
+        $results += "Erro ao acessar aplicativos instalados: $($_.Exception.Message)"
+    }
+    
+    # 9. CONEXÕES RECENTES DE REDE (WIFI)
+    Write-Host "Analisando redes WiFi salvas..." -ForegroundColor Cyan
+    try {
+        $wifiProfiles = netsh wlan show profiles
+        $results += "=== PERFIS WIFI SALVOS ==="
+        $results += $wifiProfiles
+        
+        # Coletar detalhes de cada perfil WiFi (sem senhas)
+        $profileNames = (netsh wlan show profiles) | Select-String "Perfil de todos os usuários" | 
+                       ForEach-Object {($_ -split ":")[1].Trim()}
+        
+        foreach ($profile in $profileNames) {
+            $wifiDetails = netsh wlan show profile name="$profile" key=clear
+            $results += "=== DETALHES WIFI: $profile ==="
+            $results += $wifiDetails
+        }
+    } catch {
+        $results += "Erro ao acessar perfis WiFi: $($_.Exception.Message)"
+    }
+    
+    # 10. LOGS DE SEGURANÇA
+    Write-Host "Analisando logs de seguranca..." -ForegroundColor Cyan
+    try {
+        $securityLogs = Get-EventLog -LogName Security -Newest 20 -EntryType FailureAudit,SuccessAudit | 
+                       Select-Object TimeGenerated, EntryType, InstanceId, Message
+        $results += "=== LOGS DE SEGURANCA RECENTES ==="
+        $results += ($securityLogs | Format-Table -AutoSize | Out-String)
+    } catch {
+        $results += "Erro ao acessar logs de seguranca: $($_.Exception.Message)"
+    }
+    
+    # Salvar resultados
+    $results | Out-File -FilePath $OutputPath -Encoding UTF8
+    
+    return $results
+}
+
+# Executar análise
+try {
+    Write-Host "Executando analise completa de seguranca..." -ForegroundColor Green
+    $findings = Get-SecurityInfo -OutputPath $outputFile
+    
+    Write-Host "`n=== ANALISE CONCLUIDA ===" -ForegroundColor Green
+    Write-Host "Arquivo de resultados: $outputFile" -ForegroundColor Yellow
+    Write-Host "Log de execucao: $logFile" -ForegroundColor Yellow
+    Write-Host "`nResumo dos achados salvos em:" -ForegroundColor White
+    Write-Host "- Informacoes do sistema e usuarios" -ForegroundColor Gray
+    Write-Host "- Credenciais armazenadas (metadados)" -ForegroundColor Gray
+    Write-Host "- Politicas de seguranca" -ForegroundColor Gray
+    Write-Host "- Configuracoes de rede" -ForegroundColor Gray
+    
+    # Exibir resumo
+    Write-Host "`n=== RESUMO EXECUTADO ===" -ForegroundColor Cyan
+    Get-Content $outputFile | Select-Object -First 50 | ForEach-Object { Write-Host $_ }
+    
+} catch {
+    Write-Host "Erro durante a execucao: $($_.Exception.Message)" -ForegroundColor Red
+} finally {
+    Stop-Transcript
+    Write-Host "`nAuditoria finalizada. Entre em contato com a equipe de seguranca para analise completa." -ForegroundColor Green
+}
