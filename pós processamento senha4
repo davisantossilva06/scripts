@@ -17,3 +17,10 @@ if (Test-Path $credsFile) {
         Write-Log $match.Value "Yellow"
     }
 }
+
+
+# Executar com máximo de verbosidade
+powershell -ExecutionPolicy Bypass -WindowStyle Normal -File "ColetorCompleto.ps1"
+
+# Ou executar direto no PowerShell com feedback visual
+.\ColetorCompleto.ps1
