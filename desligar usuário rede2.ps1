@@ -465,3 +465,15 @@ if (Confirm-Disconnection) {
 }
 
 Write-Colored "Escaneamento concluido" $InfoColor
+
+
+
+
+
+
+
+
+
+
+
+.\scanner-rede.ps1 -UserName "nome.usuario"
