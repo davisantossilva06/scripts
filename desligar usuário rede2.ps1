@@ -467,3 +467,5 @@ Close-NetworkResources
 Verify-NetworkDisconnection -Computers $networkComputers
 
 Write-Colored "`nOperacao de desligamento em rede concluida!" $InfoColor
+
+.\desconectar-usuario.ps1 -UserName "nome.do.usuario"
