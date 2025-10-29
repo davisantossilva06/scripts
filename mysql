@@ -1,0 +1,406 @@
+# MySQL-Security-Audit.ps1
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$ServerIP,
+    [string]$Port = "3306"
+)
+
+# Configurações de cores
+$SuccessColor = "Green"
+$WarningColor = "Yellow" 
+$ErrorColor = "Red"
+$InfoColor = "Cyan"
+$DetailColor = "Gray"
+$ExploitColor = "Magenta"
+
+function Write-Colored {
+    param([string]$Message, [string]$Color = "White")
+    Write-Host $Message -ForegroundColor $Color
+}
+
+function Test-MySQLConnection {
+    param([string]$IP, [string]$Port)
+    
+    Write-Colored "Testando conectividade com MySQL em $IP`:$Port..." $InfoColor
+    
+    try {
+        $tcpTest = New-Object System.Net.Sockets.TcpClient
+        $result = $tcpTest.BeginConnect($IP, $Port, $null, $null)
+        $success = $result.AsyncWaitHandle.WaitOne(3000, $false)
+        
+        if ($success) {
+            $tcpTest.EndConnect($result)
+            $tcpTest.Close()
+            Write-Colored "SUCESSO: Servidor MySQL esta respondendo na porta $Port" $SuccessColor
+            return $true
+        } else {
+            Write-Colored "FALHA: Nao foi possivel conectar ao servidor MySQL" $ErrorColor
+            return $false
+        }
+    }
+    catch {
+        Write-Colored "ERRO: $($_.Exception.Message)" $ErrorColor
+        return $false
+    }
+}
+
+function Get-MySQLBanner {
+    param([string]$IP, [string]$Port)
+    
+    Write-Colored "Coletando banner do servidor MySQL..." $InfoColor
+    
+    try {
+        $tcpClient = New-Object System.Net.Sockets.TcpClient($IP, $Port)
+        $stream = $tcpClient.GetStream()
+        $reader = New-Object System.IO.StreamReader($stream)
+        
+        # Aguardar resposta inicial do MySQL
+        Start-Sleep -Milliseconds 500
+        $banner = ""
+        
+        while ($stream.DataAvailable) {
+            $banner += $reader.ReadLine() + "`n"
+        }
+        
+        $tcpClient.Close()
+        
+        if ($banner) {
+            Write-Colored "BANNER ENCONTRADO:" $SuccessColor
+            Write-Colored $banner $DetailColor
+            
+            # Analisar versao do MySQL
+            if ($banner -match "(\d+\.\d+\.\d+)") {
+                $version = $matches[1]
+                Write-Colored "Versao do MySQL detectada: $version" $InfoColor
+                return $version
+            }
+        }
+        
+        return $null
+    }
+    catch {
+        Write-Colored "Nao foi possivel coletar o banner" $WarningColor
+        return $null
+    }
+}
+
+function Test-MySQLAuth {
+    param([string]$IP, [string]$Port, [string]$User, [string]$Pass)
+    
+    try {
+        # Tentar conexao usando MySQL .NET connector
+        Add-Type -Path "MySql.Data.dll" -ErrorAction SilentlyContinue
+        
+        $connectionString = "server=$IP;port=$Port;uid=$User;pwd=$Pass;connection timeout=3"
+        $connection = New-Object MySql.Data.MySqlClient.MySqlConnection($connectionString)
+        $connection.Open()
+        
+        $success = $connection.State -eq "Open"
+        $connection.Close()
+        
+        return $success
+    }
+    catch {
+        # Metodo alternativo usando teste TCP
+        try {
+            $tcpClient = New-Object System.Net.Sockets.TcpClient($IP, $Port)
+            $stream = $tcpClient.GetStream()
+            
+            # Enviar pacote de autenticacao basico
+            $authPacket = [System.Text.Encoding]::ASCII.GetBytes("$User`0$Pass`0")
+            $stream.Write($authPacket, 0, $authPacket.Length)
+            
+            Start-Sleep -Milliseconds 500
+            $response = $stream.DataAvailable
+            $tcpClient.Close()
+            
+            return $response
+        }
+        catch {
+            return $false
+        }
+    }
+}
+
+function Start-BruteForceMySQL {
+    param([string]$IP, [string]$Port)
+    
+    Write-Colored "Iniciando forca bruta contra servidor MySQL..." $ExploitColor
+    
+    # Lista de usuarios comuns
+    $commonUsers = @(
+        "root", "admin", "administrator", "mysql", "user", "test", 
+        "guest", "backup", "sys", "system", "dba", "web", "app",
+        "developer", "api", "dbadmin", "master", "owner", "sa"
+    )
+    
+    # Lista de senhas comuns
+    $commonPasswords = @(
+        "", "root", "admin", "password", "123456", "mysql", "1234",
+        "test", "guest", "pass", "123", "password1", "root123",
+        "admin123", "qwerty", "letmein", "welcome", "monkey",
+        "abc123", "password123", "root@123", "Admin@123", "123456789",
+        "12345678", "1234567", "1234567890", "000000", "111111",
+        "secret", "default", "oracle", "sql", "database", "db",
+        "server", "mysql123", "rootmysql", "toor", "passw0rd"
+    )
+    
+    $credentialsFound = @()
+    $attempts = 0
+    
+    foreach ($user in $commonUsers) {
+        Write-Colored "Testando usuario: $user" $DetailColor
+        
+        foreach ($password in $commonPasswords) {
+            $attempts++
+            Write-Colored "  Tentativa $attempts : $user / $password" "Gray"
+            
+            if (Test-MySQLAuth -IP $IP -Port $Port -User $user -Pass $password) {
+                Write-Colored "  CREDENCIAIS VALIDAS ENCONTRADAS: $user / $password" $SuccessColor
+                $credentialsFound += @{User = $user; Password = $password}
+                break
+            }
+        }
+        
+        if ($credentialsFound.Count -gt 0) {
+            break
+        }
+    }
+    
+    return $credentialsFound
+}
+
+function Test-MySQLSecurityIssues {
+    param([string]$IP, [string]$Port, [string]$User, [string]$Pass)
+    
+    Write-Colored "Testando vulnerabilidades de seguranca..." $ExploitColor
+    
+    $vulnerabilities = @()
+    
+    try {
+        Add-Type -Path "MySql.Data.dll" -ErrorAction SilentlyContinue
+        $connectionString = "server=$IP;port=$Port;uid=$User;pwd=$Pass;connection timeout=5"
+        $connection = New-Object MySql.Data.MySqlClient.MySqlConnection($connectionString)
+        $connection.Open()
+        
+        # Teste 1: Verificar se usuario tem privilegios de root
+        $command = $connection.CreateCommand()
+        $command.CommandText = "SELECT CURRENT_USER(), super_priv FROM mysql.user WHERE user = CURRENT_USER()"
+        $reader = $command.ExecuteReader()
+        
+        while ($reader.Read()) {
+            $currentUser = $reader.GetString(0)
+            $superPriv = $reader.GetString(1)
+            
+            if ($superPriv -eq "Y") {
+                Write-Colored "VULNERABILIDADE: Usuario tem privilegios SUPER" $WarningColor
+                $vulnerabilities += "Privilegios SUPER concedidos ao usuario"
+            }
+        }
+        $reader.Close()
+        
+        # Teste 2: Verificar se acesso remoto esta habilitado para root
+        $command.CommandText = "SELECT user, host FROM mysql.user WHERE user = 'root' AND host = '%'"
+        $reader = $command.ExecuteReader()
+        
+        if ($reader.HasRows) {
+            Write-Colored "VULNERABILIDADE: Root com acesso remoto habilitado (%)" $WarningColor
+            $vulnerabilities += "Usuario root com acesso remoto habilitado"
+        }
+        $reader.Close()
+        
+        # Teste 3: Verificar senhas vazias
+        $command.CommandText = "SELECT user, host FROM mysql.user WHERE authentication_string = '' OR password = ''"
+        $reader = $command.ExecuteReader()
+        
+        if ($reader.HasRows) {
+            Write-Colored "VULNERABILIDADE: Usuarios com senhas vazias encontrados" $WarningColor
+            $vulnerabilities += "Usuarios com senhas vazias configuradas"
+        }
+        $reader.Close()
+        
+        # Teste 4: Verificar versoes antigas com vulnerabilidades conhecidas
+        $command.CommandText = "SELECT VERSION()"
+        $version = $command.ExecuteScalar()
+        
+        Write-Colored "Versao do MySQL: $version" $InfoColor
+        
+        if ($version -match "5\.1\." -or $version -match "5\.5\." -or $version -match "5\.6\.") {
+            Write-Colored "VULNERABILIDADE: Versao antiga do MySQL com vulnerabilidades conhecidas" $WarningColor
+            $vulnerabilities += "Versao antiga do MySQL: $version"
+        }
+        
+        # Teste 5: Verificar permissoes de arquivo
+        try {
+            $command.CommandText = "SELECT @@secure_file_priv"
+            $secureFilePriv = $command.ExecuteScalar()
+            
+            if ($secureFilePriv -eq "" -or $secureFilePriv -eq $null) {
+                Write-Colored "VULNERABILIDADE: secure_file_priv nao configurado" $WarningColor
+                $vulnerabilities += "secure_file_priv nao configurado - permite leitura/escrita de arquivos"
+            }
+        }
+        catch {
+            Write-Colored "Nao foi possivel verificar secure_file_priv" $DetailColor
+        }
+        
+        $connection.Close()
+        
+    }
+    catch {
+        Write-Colored "Nao foi possivel testar vulnerabilidades: $($_.Exception.Message)" $ErrorColor
+    }
+    
+    return $vulnerabilities
+}
+
+function Test-MySQLConfigurations {
+    param([string]$IP, [string]$Port)
+    
+    Write-Colored "Analisando configuracoes do servidor MySQL..." $InfoColor
+    
+    $issues = @()
+    
+    # Testar se porta esta aberta sem autenticacao
+    Write-Colored "Testando acesso sem autenticacao..." $DetailColor
+    try {
+        $tcpClient = New-Object System.Net.Sockets.TcpClient($IP, $Port)
+        $stream = $tcpClient.GetStream()
+        
+        # Tentar conexao sem credenciais
+        $nullPacket = [System.Text.Encoding]::ASCII.GetBytes("`0`0`0`0")
+        $stream.Write($nullPacket, 0, $nullPacket.Length)
+        
+        Start-Sleep -Milliseconds 1000
+        if ($stream.DataAvailable) {
+            Write-Colored "VULNERABILIDADE: Servidor aceita conexoes sem autenticacao" $WarningColor
+            $issues += "Aceita conexoes sem autenticacao"
+        }
+        
+        $tcpClient.Close()
+    }
+    catch {
+        Write-Colored "Conexao sem autenticacao recusada (BOM)" $SuccessColor
+    }
+    
+    return $issues
+}
+
+function Export-Findings {
+    param(
+        [string]$IP,
+        [array]$Credentials,
+        [array]$Vulnerabilities,
+        [array]$ConfigIssues,
+        [string]$Banner
+    )
+    
+    Write-Colored "`nRELATORIO FINAL DE SEGURANCA MYSQL" $InfoColor
+    Write-Colored "==========================================" $InfoColor
+    Write-Colored "Servidor: $IP" $InfoColor
+    Write-Colored "Data: $(Get-Date)" $InfoColor
+    Write-Colored "==========================================" $InfoColor
+    
+    if ($Banner) {
+        Write-Colored "BANNER:" $InfoColor
+        Write-Colored $Banner $DetailColor
+    }
+    
+    if ($Credentials.Count -gt 0) {
+        Write-Colored "CREDENCIAIS ENCONTRADAS:" $WarningColor
+        foreach ($cred in $Credentials) {
+            Write-Colored "  Usuario: $($cred.User)" $WarningColor
+            Write-Colored "  Senha: $($cred.Password)" $WarningColor
+            Write-Colored "  ---" $WarningColor
+        }
+    } else {
+        Write-Colored "CREDENCIAIS: Nenhuma credencial valida encontrada" $SuccessColor
+    }
+    
+    if ($Vulnerabilities.Count -gt 0) {
+        Write-Colored "VULNERABILIDADES ENCONTRADAS:" $ErrorColor
+        foreach ($vuln in $Vulnerabilities) {
+            Write-Colored "  - $vuln" $ErrorColor
+        }
+    } else {
+        Write-Colored "VULNERABILIDADES: Nenhuma vulnerabilidade critica encontrada" $SuccessColor
+    }
+    
+    if ($ConfigIssues.Count -gt 0) {
+        Write-Colored "PROBLEMAS DE CONFIGURACAO:" $WarningColor
+        foreach ($issue in $ConfigIssues) {
+            Write-Colored "  - $issue" $WarningColor
+        }
+    }
+    
+    # Resumo de seguranca
+    Write-Colored "`nRESUMO DE SEGURANCA:" $InfoColor
+    $riskLevel = "BAIXO"
+    
+    if ($Credentials.Count -gt 0 -or $Vulnerabilities.Count -gt 5) {
+        $riskLevel = "ALTO"
+    } elseif ($Vulnerabilities.Count -gt 2) {
+        $riskLevel = "MEDIO"
+    }
+    
+    Write-Colored "Nivel de risco: $riskLevel" $(if($riskLevel -eq "ALTO"){$ErrorColor}elseif($riskLevel -eq "MEDIO"){$WarningColor}else{$SuccessColor})
+    Write-Colored "Total de vulnerabilidades: $($Vulnerabilities.Count + $ConfigIssues.Count)" $InfoColor
+}
+
+# EXECUCAO PRINCIPAL
+Clear-Host
+Write-Colored "AUDITORIA DE SEGURANCA MYSQL" $InfoColor
+Write-Colored "==========================================" $InfoColor
+Write-Colored "Alvo: $ServerIP`:$Port" $InfoColor
+Write-Colored "Iniciando: $(Get-Date)" $InfoColor
+Write-Colored "==========================================" $InfoColor
+
+# Verificar se e necessario instalar modulo MySQL
+Write-Colored "Verificando dependencias..." $InfoColor
+try {
+    Import-Module MySql -ErrorAction Stop
+    Write-Colored "Modulo MySQL carregado" $SuccessColor
+}
+catch {
+    Write-Colored "Modulo MySQL nao disponivel, usando metodos alternativos" $WarningColor
+}
+
+# Teste de conectividade
+if (-not (Test-MySQLConnection -IP $ServerIP -Port $Port)) {
+    Write-Colored "Auditoria abortada - servidor inacessivel" $ErrorColor
+    exit 1
+}
+
+# Coletar informacoes do servidor
+$banner = Get-MySQLBanner -IP $ServerIP -Port $Port
+
+# Testar configuracoes de seguranca
+$configIssues = Test-MySQLConfigurations -IP $ServerIP -Port $Port
+
+# Tentar forca bruta
+$foundCredentials = Start-BruteForceMySQL -IP $ServerIP -Port $Port
+
+# Testar vulnerabilidades se credenciais foram encontradas
+$vulnerabilities = @()
+if ($foundCredentials.Count -gt 0) {
+    foreach ($cred in $foundCredentials) {
+        Write-Colored "Testando vulnerabilidades com credenciais: $($cred.User)/$($cred.Password)" $InfoColor
+        $vulns = Test-MySQLSecurityIssues -IP $ServerIP -Port $Port -User $cred.User -Pass $cred.Password
+        $vulnerabilities += $vulns
+    }
+} else {
+    Write-Colored "Nenhuma credencial valida encontrada para teste de vulnerabilidades" $WarningColor
+}
+
+# Gerar relatorio final
+Export-Findings -IP $ServerIP -Credentials $foundCredentials -Vulnerabilities $vulnerabilities -ConfigIssues $configIssues -Banner $banner
+
+Write-Colored "`nAuditoria concluida!" $SuccessColor
+
+
+
+
+
+
+
+.\MySQL-Security-Audit.ps1 -ServerIP "192.168.1.100" -Port "3306"
